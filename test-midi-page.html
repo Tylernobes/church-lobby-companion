@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Church Lobby MIDI Test</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background: #1a1a1a;
+        color: #fff;
+      }
+
+      .status {
+        background: #333;
+        padding: 15px;
+        border-radius: 8px;
+        margin: 20px 0;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+        margin: 20px 0;
+      }
+
+      button {
+        padding: 12px 20px;
+        border: none;
+        border-radius: 6px;
+        background: #4caf50;
+        color: white;
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      button:hover {
+        background: #45a049;
+      }
+
+      button.fade-out {
+        background: #f44336;
+      }
+
+      button.fade-out:hover {
+        background: #da190b;
+      }
+
+      .log {
+        background: #222;
+        padding: 15px;
+        border-radius: 8px;
+        max-height: 300px;
+        overflow-y: auto;
+        font-family: monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+
+      audio {
+        width: 100%;
+        margin: 20px 0;
+      }
+
+      .volume-display {
+        background: #444;
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 4px;
+      }
+
+      .volume-bar {
+        width: 100%;
+        height: 20px;
+        background: #666;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      .volume-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #4caf50, #8bc34a);
+        width: 100%;
+        transition: width 0.1s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🎵 Church Lobby MIDI Integration Test</h1>
+
+    <div class="status">
+      <h3>Audio Status</h3>
+      <div id="status">Initializing...</div>
+      <div class="volume-display">
+        <label>Volume:</label>
+        <div class="volume-bar">
+          <div class="volume-fill" id="volumeFill"></div>
+        </div>
+        <span id="volumeText">100%</span>
+      </div>
+    </div>
+
+    <audio id="audioPlayer" controls>
+      <source
+        src="https://www.soundjay.com/misc/sounds/bell-ringing-05.wav"
+        type="audio/wav"
+      />
+      <source
+        src="https://www.soundjay.com/misc/sounds/bell-ringing-05.mp3"
+        type="audio/mpeg"
+      />
+      Your browser does not support the audio element.
+    </audio>
+
+    <div class="controls">
+      <button onclick="testPlay()">▶️ Play</button>
+      <button onclick="testPause()">⏸️ Pause</button>
+      <button onclick="testFadeIn(3)">📈 Fade In (3s)</button>
+      <button onclick="testFadeIn(10)" class="fade-out">
+        📈 Fade In (10s)
+      </button>
+      <button onclick="testFadeOut(3)" class="fade-out">
+        📉 Fade Out (3s)
+      </button>
+      <button onclick="testFadeOut(10)" class="fade-out">
+        📉 Fade Out (10s)
+      </button>
+      <button onclick="clearLog()">🗑️ Clear Log</button>
+      <button onclick="testMIDI()">🎹 Test MIDI</button>
+    </div>
+
+    <div class="status">
+      <h3>Console Log</h3>
+      <div id="log" class="log">Ready to test MIDI integration...\n</div>
+    </div>
+
+    <script>
+      const audio = document.getElementById("audioPlayer");
+      const statusDiv = document.getElementById("status");
+      const logDiv = document.getElementById("log");
+      const volumeFill = document.getElementById("volumeFill");
+      const volumeText = document.getElementById("volumeText");
+
+      let currentVolume = 1.0;
+
+      function log(message) {
+        const timestamp = new Date().toLocaleTimeString();
+        logDiv.textContent += `[${timestamp}] ${message}\n`;
+        logDiv.scrollTop = logDiv.scrollHeight;
+        console.log(message);
+      }
+
+      function updateStatus() {
+        const status = `Playing: ${!audio.paused} | Current Time: ${audio.currentTime.toFixed(
+          1
+        )}s | Duration: ${
+          audio.duration ? audio.duration.toFixed(1) : "unknown"
+        }s`;
+        statusDiv.textContent = status;
+
+        // Update volume display
+        const volumePercent = Math.round(currentVolume * 100);
+        volumeFill.style.width = volumePercent + "%";
+        volumeText.textContent = volumePercent + "%";
+      }
+
+      function clearLog() {
+        logDiv.textContent = "Log cleared...\n";
+      }
+
+      // Audio event listeners
+      audio.addEventListener("loadedmetadata", updateStatus);
+      audio.addEventListener("timeupdate", updateStatus);
+      audio.addEventListener("play", () => {
+        log("✅ Audio started playing");
+        updateStatus();
+      });
+      audio.addEventListener("pause", () => {
+        log("⏸️ Audio paused");
+        updateStatus();
+      });
+      audio.addEventListener("ended", () => {
+        log("🏁 Audio ended");
+        updateStatus();
+      });
+
+      // Set initial volume
+      audio.volume = currentVolume;
+
+      // Basic controls
+      async function testPlay() {
+        log("🎵 Testing play...");
+        try {
+          await audio.play();
+          log("✅ Play successful");
+        } catch (error) {
+          log("❌ Play failed: " + error.message);
+        }
+      }
+
+      async function testPause() {
+        log("⏸️ Testing pause...");
+        audio.pause();
+        log("✅ Pause successful");
+      }
+
+      // Smooth fade functions
+      async function testFadeIn(seconds = 10) {
+        log(`📈 Testing fade in over ${seconds} seconds...`);
+
+        try {
+          // Start playing at volume 0
+          audio.volume = 0;
+          currentVolume = 0;
+          updateStatus();
+
+          await audio.play();
+
+          const fadeSteps = 50;
+          const stepInterval = (seconds * 1000) / fadeSteps;
+          const volumeIncrement = 1 / fadeSteps;
+
+          for (let step = 1; step <= fadeSteps; step++) {
+            const newVolume = Math.min(1, step * volumeIncrement);
+            await new Promise((resolve) => setTimeout(resolve, stepInterval));
+
+            audio.volume = newVolume;
+            currentVolume = newVolume;
+            updateStatus();
+
+            if (step % 10 === 0) {
+              log(
+                `📈 Fade in step ${step}/${fadeSteps}: volume = ${newVolume.toFixed(
+                  2
+                )}`
+              );
+            }
+          }
+
+          audio.volume = 1;
+          currentVolume = 1;
+          updateStatus();
+          log(`✅ Smooth fade in completed over ${seconds} seconds`);
+        } catch (error) {
+          log("❌ Fade in failed: " + error.message);
+        }
+      }
+
+      async function testFadeOut(seconds = 10) {
+        log(`📉 Testing fade out over ${seconds} seconds...`);
+
+        try {
+          const startVolume = audio.volume;
+          currentVolume = startVolume;
+          log(`📊 Starting volume: ${startVolume}`);
+
+          const fadeSteps = 50;
+          const stepInterval = (seconds * 1000) / fadeSteps;
+          const volumeDecrement = startVolume / fadeSteps;
+
+          for (let step = 1; step <= fadeSteps; step++) {
+            const newVolume = Math.max(0, startVolume - step * volumeDecrement);
+            await new Promise((resolve) => setTimeout(resolve, stepInterval));
+
+            audio.volume = newVolume;
+            currentVolume = newVolume;
+            updateStatus();
+
+            if (step % 10 === 0) {
+              log(
+                `📉 Fade out step ${step}/${fadeSteps}: volume = ${newVolume.toFixed(
+                  2
+                )}`
+              );
+            }
+          }
+
+          audio.volume = 0;
+          currentVolume = 0;
+          audio.pause();
+          updateStatus();
+          log(`✅ Smooth fade out completed over ${seconds} seconds`);
+        } catch (error) {
+          log("❌ Fade out failed: " + error.message);
+        }
+      }
+
+      // Set up Church Lobby integration
+      function setupChurchLobbyIntegration() {
+        log("🏛️ Setting up Church Lobby Companion integration...");
+
+        // Expose controls to the desktop app
+        window.miniPlayerCommands = {
+          play: testPlay,
+          pause: testPause,
+          seek: (posMs) => {
+            audio.currentTime = posMs / 1000;
+            log(`⏩ Seek to ${posMs}ms`);
+          },
+          getSoundObject: () => audio, // Return the HTML audio element
+          initialized: true,
+        };
+
+        // Listen for MIDI commands
+        const handleCommand = async (event) => {
+          const { type, seconds = 10 } = event.detail || {};
+          log(`🎹 Received MIDI command: ${type} (${seconds}s)`);
+
+          switch (type) {
+            case "fadeIn":
+              await testFadeIn(seconds);
+              break;
+            case "fadeOut":
+              await testFadeOut(seconds);
+              break;
+            case "stop":
+              await testPause();
+              break;
+            case "play":
+              await testPlay();
+              break;
+            case "pause":
+              await testPause();
+              break;
+            default:
+              log(`❓ Unknown command: ${type}`);
+          }
+        };
+
+        // Set up event listeners
+        document.addEventListener("churchLobbyCommand", handleCommand);
+        window.addEventListener("churchLobbyCommand", handleCommand);
+
+        // Listen for postMessage from Electron
+        window.addEventListener("message", (event) => {
+          if (event.data?.type === "CHURCH_LOBBY_COMMAND") {
+            const { command, seconds } = event.data;
+            handleCommand({ detail: { type: command, seconds } });
+          }
+        });
+
+        log("✅ Church Lobby integration ready");
+      }
+
+      function testMIDI() {
+        log("🎹 Testing MIDI command simulation...");
+
+        // Simulate MIDI commands
+        const commands = [
+          { type: "fadeIn", seconds: 2 },
+          { type: "fadeOut", seconds: 2 },
+        ];
+
+        commands.forEach((command, index) => {
+          setTimeout(() => {
+            log(`🎹 Simulating MIDI: ${command.type}`);
+            const event = new CustomEvent("churchLobbyCommand", {
+              detail: command,
+            });
+            document.dispatchEvent(event);
+          }, index * 4000); // 4 second intervals
+        });
+      }
+
+      // Initialize everything
+      window.addEventListener("load", () => {
+        setupChurchLobbyIntegration();
+        updateStatus();
+        log("🚀 Test page loaded and ready");
+      });
+
+      // Update status every second
+      setInterval(updateStatus, 1000);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,81 @@
+{
+  "name": "church-lobby-companion",
+  "version": "1.0.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"electron electron/main-dev.js\"",
+    "build": "vite build && tsc -p tsconfig.json && electron-builder",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "electron ."
+  },
+  "build": {
+    "appId": "com.churchlobby.companion",
+    "productName": "Church Lobby Companion",
+    "icon": "assets/icon",
+    "files": [
+      "electron/**/*",
+      "dist/renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/renderer",
+        "to": "renderer",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "icon": "assets/icons.icns",
+      "category": "public.app-category.music",
+      "identity": "Tyler Nobes (7T6ZP3UT35)",
+      "entitlements": "entitlements.mac.plist",
+      "notarize": {
+        "teamId": "7T6ZP3UT35"
+      },
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "sign": true
+    },
+    "win": {
+      "icon": "assets/icons.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": [
+        "AppImage"
+      ]
+    }
+  },
+  "dependencies": {
+    "@julusian/midi": "^3.0.1",
+    "electron-store": "^9.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.0",
+    "@types/node": "^24.5.2",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}
