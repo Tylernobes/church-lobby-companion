@@ -33,6 +33,74 @@ interface MidiDevice {
 }
 
 export default function App() {
+  // Determine and track which CLUI URL to load in the iframe (dev/prod with fallback)
+  const [iframeSrc, setIframeSrc] = useState<string>("about:blank");
+
+  // Helper: probe a URL quickly to see if it's reachable
+  const probeUrl = async (url: string, timeoutMs = 1500): Promise<boolean> => {
+    try {
+      // Use fetch no-cors; network errors will reject, reachable hosts will resolve
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      await fetch(url, {
+        mode: "no-cors",
+        cache: "no-store",
+        signal: ctrl.signal as any,
+      });
+      clearTimeout(t);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Decide which URL to use for the embedded CLUI app
+  useEffect(() => {
+    const decide = async () => {
+      const prod = "https://clui.expo.app";
+
+      // Allow manual override stored locally (handy for custom tunnels)
+      const manual = localStorage.getItem("clui_iframe_url");
+      if (manual && (await probeUrl(manual))) {
+        setIframeSrc(manual);
+        return;
+      }
+
+      // When running the Electron renderer via Vite dev server (protocol !== file:),
+      // prefer local Expo web dev servers. Fallback to production if offline.
+      if (window.location.protocol !== "file:") {
+        const candidates = [
+          "http://localhost:19006/",
+          "http://127.0.0.1:19006/",
+          "http://localhost:8081/",
+          "http://127.0.0.1:8081/",
+        ];
+
+        for (const base of candidates) {
+          if (await probeUrl(base)) {
+            setIframeSrc(base.replace(/\/$/, ""));
+            return;
+          }
+        }
+
+        // Last-resort dev URL (was previously hardcoded exp.direct). Skip if offline.
+        const previousTunnel = "https://wc19uzo-churchlobby-8081.exp.direct";
+        if (await probeUrl(previousTunnel)) {
+          setIframeSrc(previousTunnel);
+          return;
+        }
+
+        // Fall back to production
+        setIframeSrc(prod);
+        return;
+      }
+
+      // Packaged app (file:): always use production
+      setIframeSrc(prod);
+    };
+
+    decide();
+  }, []);
   // Add global styles to prevent scrolling and margins
   React.useEffect(() => {
     document.body.style.margin = "0";
@@ -226,10 +294,13 @@ export default function App() {
         // Send message to CLUI to start listening for song clicks
         const iframe = document.querySelector("iframe") as HTMLIFrameElement;
         if (iframe && iframe.contentWindow) {
-          const targetOrigin =
-            window.location.protocol === "file:"
-              ? "https://clui.expo.app"
-              : "https://wc19uzo-churchlobby-8081.exp.direct";
+          const targetOrigin = (() => {
+            try {
+              return new URL(iframeSrc).origin;
+            } catch {
+              return "*";
+            }
+          })();
           iframe.contentWindow.postMessage(
             { type: "START_SONG_SELECTION_MODE" },
             targetOrigin
@@ -346,11 +417,7 @@ export default function App() {
       {/* Church Lobby App (Full Screen) */}
       <iframe
         id="website-iframe"
-        src={
-          window.location.protocol === "file:"
-            ? "https://clui.expo.app"
-            : "https://wc19uzo-churchlobby-8081.exp.direct"
-        }
+        src={iframeSrc}
         style={{
           width: "100%",
           height: "100%",
@@ -965,10 +1032,13 @@ export default function App() {
                         "iframe"
                       ) as HTMLIFrameElement;
                       if (iframe && iframe.contentWindow) {
-                        const targetOrigin =
-                          window.location.protocol === "file:"
-                            ? "https://clui.expo.app"
-                            : "https://wc19uzo-churchlobby-8081.exp.direct";
+                        const targetOrigin = (() => {
+                          try {
+                            return new URL(iframeSrc).origin;
+                          } catch {
+                            return "*";
+                          }
+                        })();
                         iframe.contentWindow.postMessage(
                           { type: "STOP_SONG_SELECTION_MODE" },
                           targetOrigin

@@ -27,9 +27,17 @@ function createWindow() {
     minWidth: 375,
     minHeight: 667,
   });
-  console.log("Loading Church Lobby Companion desktop app");
-  win.loadURL("http://localhost:5173");
-  if (isDev) win.webContents.openDevTools();
+  console.log("Loading Church Lobby Companion desktop app (DEV)");
+  // In dev, load the Vite dev server so the renderer uses http protocol
+  // This makes the iframe pick the Expo dev URL instead of the production site.
+  if (isDev) {
+    win.loadURL("http://localhost:5173");
+    win.webContents.openDevTools();
+  } else {
+    win.loadURL(
+      `file://${path.join(__dirname, "../dist/renderer/index.html")}`
+    );
+  }
 }
 
 let input = null;
@@ -236,46 +244,8 @@ function dispatchMappedAction(mapping) {
 function postToWebsite(channel, payload) {
   console.log("Posting to website:", channel, payload);
   if (win && win.webContents) {
+    // Forward to renderer; preload will forward to the iframe via postMessage.
     win.webContents.send(channel, payload);
-
-    // Execute smooth fade commands using the EXACT SAME method as the test buttons
-    const { type, seconds = 10 } = payload;
-    console.log(
-      `🎹 MIDI executing: ${type} (${seconds}s) - using test button method`
-    );
-
-    win.webContents
-      .executeJavaScript(
-        `
-        console.log('🎹 MIDI COMMAND: ${type} (${seconds}s)');
-        
-        // Use the EXACT same method as the working test buttons
-        try {
-          const iframe = document.getElementById('website-iframe');
-          if (iframe?.contentWindow) {
-            console.log('🎹 Found iframe, sending message like test buttons...');
-            
-            // This is the EXACT same code that works for test buttons
-            iframe.contentWindow.postMessage({
-              type: "AUDIO_COMMAND",
-              command: "${type}",
-              seconds: ${seconds},
-              songId: ${JSON.stringify(payload.songId || "")},
-              songTitle: ${JSON.stringify(payload.songTitle || "")}
-            }, "*");
-            
-            console.log('✅ MIDI command sent to iframe: ${type} (${seconds}s) - Song: ${
-          payload.songTitle || "none"
-        }');
-          } else {
-            console.log('❌ MIDI: Cannot access iframe');
-          }
-        } catch (error) {
-          console.error('❌ MIDI command failed:', error);
-        }
-      `
-      )
-      .catch((e) => console.error("MIDI JavaScript execution failed:", e));
   }
 }
 
