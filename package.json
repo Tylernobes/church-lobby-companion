@@ -17,6 +17,7 @@
       "electron/**/*",
       "dist/renderer/**/*"
     ],
+    "afterSign": "scripts/notarize.js",
     "extraResources": [
       {
         "from": "dist/renderer",
@@ -31,9 +32,8 @@
       "category": "public.app-category.music",
       "identity": "Tyler Nobes (7T6ZP3UT35)",
       "entitlements": "entitlements.mac.plist",
-      "notarize": {
-        "teamId": "7T6ZP3UT35"
-      },
+      "hardenedRuntime": true,
+      "notarize": false,
       "target": [
         {
           "target": "dmg",
