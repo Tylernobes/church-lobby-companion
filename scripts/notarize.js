@@ -2,8 +2,7 @@ const { notarize } = require("@electron/notarize");
 
 /**
  * afterSign hook for electron-builder. Ensures the app is notarized for macOS builds.
- * Fails fast with a clear error if required Apple credentials are missing so we
- * don't accidentally ship an un-notarized DMG that macOS will block.
+ * Uses App Store Connect API key for authentication.
  */
 exports.default = async function notarizing(context) {
   const { electronPlatformName, appOutDir } = context;
@@ -13,22 +12,23 @@ exports.default = async function notarizing(context) {
 
   const appName = context.packager.appInfo.productFilename;
 
-  const appleId = process.env.APPLE_ID;
-  const appleIdPassword = process.env.APPLE_APP_SPECIFIC_PASSWORD;
+  // API Key method (recommended)
+  const appleApiKey = process.env.APPLE_API_KEY || "/Users/tyler/Documents/App Build/AuthKey_TGZQHAB68V.p8";
+  const appleApiKeyId = process.env.APPLE_API_KEY_ID || "TGZQHAB68V";
+  const appleApiIssuer = process.env.APPLE_API_ISSUER_ID || "dfca6c2d-1c83-4780-b61b-f528cecd2605";
   const teamId = process.env.APPLE_TEAM_ID || "7T6ZP3UT35";
 
-  if (!appleId || !appleIdPassword) {
-    throw new Error(
-      "Missing APPLE_ID or APPLE_APP_SPECIFIC_PASSWORD in environment. Set these to enable notarization."
-    );
-  }
+  console.log("Notarization credentials:");
+  console.log("API Key:", appleApiKey);
+  console.log("API Key ID:", appleApiKeyId);
+  console.log("API Issuer:", appleApiIssuer);
+  console.log("Team ID:", teamId);
 
   await notarize({
     appBundleId: "com.churchlobby.companion",
     appPath: `${appOutDir}/${appName}.app`,
-    appleId,
-    appleIdPassword,
-    teamId,
-    staple: true,
+    appleApiKey: appleApiKey,
+    appleApiKeyId: appleApiKeyId,
+    appleApiIssuer: appleApiIssuer,
   });
 };

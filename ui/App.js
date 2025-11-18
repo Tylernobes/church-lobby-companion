@@ -37,6 +37,66 @@ exports.default = App;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = __importStar(require("react"));
 function App() {
+    // Determine and track which CLUI URL to load in the iframe (dev/prod with fallback)
+    const [iframeSrc, setIframeSrc] = (0, react_1.useState)("about:blank");
+    // Helper: probe a URL quickly to see if it's reachable
+    const probeUrl = async (url, timeoutMs = 1500) => {
+        try {
+            // Use fetch no-cors; network errors will reject, reachable hosts will resolve
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), timeoutMs);
+            await fetch(url, {
+                mode: "no-cors",
+                cache: "no-store",
+                signal: ctrl.signal,
+            });
+            clearTimeout(t);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    };
+    // Decide which URL to use for the embedded CLUI app
+    (0, react_1.useEffect)(() => {
+        const decide = async () => {
+            const prod = "https://clui.expo.app";
+            // Allow manual override stored locally (handy for custom tunnels)
+            const manual = localStorage.getItem("clui_iframe_url");
+            if (manual && (await probeUrl(manual))) {
+                setIframeSrc(manual);
+                return;
+            }
+            // When running the Electron renderer via Vite dev server (protocol !== file:),
+            // prefer local Expo web dev servers. Fallback to production if offline.
+            if (window.location.protocol !== "file:") {
+                const candidates = [
+                    "http://localhost:19006/",
+                    "http://127.0.0.1:19006/",
+                    "http://localhost:8081/",
+                    "http://127.0.0.1:8081/",
+                ];
+                for (const base of candidates) {
+                    if (await probeUrl(base)) {
+                        setIframeSrc(base.replace(/\/$/, ""));
+                        return;
+                    }
+                }
+                // Last-resort dev URL (was previously hardcoded exp.direct). Skip if offline.
+                const previousTunnel = "https://wc19uzo-anonymous-8081.exp.direct";
+                if (await probeUrl(previousTunnel)) {
+                    setIframeSrc(previousTunnel);
+                    return;
+                }
+                // Fall back to production
+                setIframeSrc(prod);
+                return;
+            }
+            // Packaged app (file:): always use production
+            setIframeSrc(prod);
+        };
+        decide();
+    }, []);
     // Add global styles to prevent scrolling and margins
     react_1.default.useEffect(() => {
         document.body.style.margin = "0";
@@ -58,12 +118,43 @@ function App() {
     const [selectedDevice, setSelectedDevice] = (0, react_1.useState)("");
     const [showMidiPanel, setShowMidiPanel] = (0, react_1.useState)(false);
     const [isConnected, setIsConnected] = (0, react_1.useState)(false);
+    const [currentDevice, setCurrentDevice] = (0, react_1.useState)(null);
     const [showDurationPicker, setShowDurationPicker] = (0, react_1.useState)(null);
     const [editingMapping, setEditingMapping] = (0, react_1.useState)(null);
     const [customDuration, setCustomDuration] = (0, react_1.useState)("");
     const [showSongPicker, setShowSongPicker] = (0, react_1.useState)(null);
     const [selectedSong, setSelectedSong] = (0, react_1.useState)(null);
     const [waitingForSongSelection, setWaitingForSongSelection] = (0, react_1.useState)(false);
+    const loadMidiDevices = async () => {
+        try {
+            const deviceList = await window.electron?.invoke?.('midi:get-devices') || [];
+            setDevices(deviceList);
+            // Auto-connect to virtual port if no device selected
+            if (!selectedDevice && deviceList.length > 0) {
+                const virtualPort = deviceList.find((d) => d.name?.toLowerCase().includes('virtual') || d.name?.toLowerCase().includes('church lobby'));
+                if (virtualPort) {
+                    await connectToDevice(virtualPort);
+                }
+            }
+        }
+        catch (error) {
+            console.error('Failed to load MIDI devices:', error);
+            setStatus('Failed to load MIDI devices');
+        }
+    };
+    const connectToDevice = async (device) => {
+        try {
+            await window.electron?.invoke?.('midi:connect', device.id);
+            setSelectedDevice(device.id.toString());
+            setIsConnected(true);
+            setCurrentDevice(device.name);
+            setStatus(`Connected to ${device.name}`);
+        }
+        catch (error) {
+            console.error('Failed to connect to device:', error);
+            setStatus(`Failed to connect to ${device.name}`);
+        }
+    };
     (0, react_1.useEffect)(() => {
         // Load MIDI devices on startup
         loadMidiDevices();
@@ -75,20 +166,35 @@ function App() {
                     (learningMode.action.includes("fade") ? 10 : undefined);
                 console.log(`🔥 Creating new mapping with learningMode.duration=${learningMode.duration}, calculatedSeconds=${calculatedSeconds}`);
                 const newMapping = {
-                    id: `${Date.now()}-${result.note}`,
-                    type: "note",
+                    id: `${Date.now()}-${result.number}`,
+                    type: result.type || "note",
                     channel: result.channel,
-                    number: result.note,
+                    number: result.number ?? result.note,
                     action: learningMode.action,
                     seconds: calculatedSeconds,
                     songId: learningMode.songId,
                     songTitle: learningMode.songTitle,
+                    // Tag mapping source; default to virtual if unspecified for safety
+                    source: result.source === "hardware"
+                        ? "hardware"
+                        : result.source || "virtual",
                 };
                 console.log(`🔥 Created mapping:`, newMapping);
                 const updatedMappings = [...mappings, newMapping];
                 setMappings(updatedMappings);
-                saveMappings(updatedMappings);
-                setStatus(`✅ Mapped Ch${result.channel} Note${result.note} → ${learningMode.action} (${calculatedSeconds}s)`);
+                (async () => {
+                    try {
+                        await saveMappings(updatedMappings);
+                        const reloaded = await window.electron?.invoke?.("map:get");
+                        if (Array.isArray(reloaded))
+                            setMappings(reloaded);
+                    }
+                    catch { }
+                })();
+                const what = (result.type === "cc"
+                    ? `CC${result.number}`
+                    : `Note${result.number ?? result.note}`) || "Message";
+                setStatus(`✅ Mapped Ch${result.channel} ${what} → ${learningMode.action}${calculatedSeconds ? ` (${calculatedSeconds}s)` : ""}`);
                 learningMode.resolve(newMapping);
                 setLearningMode(null);
                 // Clear selected song and waiting state after successful mapping
@@ -117,49 +223,10 @@ function App() {
     (0, react_1.useEffect)(() => {
         loadMappings();
     }, []);
-    const loadMidiDevices = async () => {
-        try {
-            const deviceList = await window.electron?.requestMidiDevices?.();
-            if (deviceList) {
-                setDevices(deviceList);
-                // Auto-connect to first available hardware device (only if not already connected)
-                const hardwareDevice = deviceList.find((d) => d.name !== "Virtual Port (for testing)");
-                if (hardwareDevice && !selectedDevice && !isConnected) {
-                    setSelectedDevice(hardwareDevice.id.toString());
-                    await connectToDevice(hardwareDevice.id.toString());
-                }
-            }
-        }
-        catch (error) {
-            console.error("Failed to load MIDI devices:", error);
-        }
-    };
-    const connectToDevice = async (deviceId) => {
-        const id = deviceId || selectedDevice;
-        if (id && !isConnected) {
-            try {
-                console.log(`Attempting to connect to device: ${id}`);
-                const success = await window.electron?.connectMidiDevice?.(id);
-                if (success) {
-                    setIsConnected(true);
-                    setStatus(`✅ Connected to MIDI device`);
-                    console.log(`✅ Successfully connected to device: ${id}`);
-                }
-                else {
-                    setStatus(`❌ Connection failed`);
-                    console.error(`❌ Failed to connect to device: ${id}`);
-                }
-            }
-            catch (error) {
-                setStatus(`❌ Connection failed`);
-                console.error("Connection error:", error);
-            }
-        }
-    };
     const startLearning = (action, duration, songId, songTitle) => {
         return new Promise((resolve) => {
             setLearningMode({ action, resolve, duration, songId, songTitle });
-            setStatus(`🎓 Press a MIDI key to map to: ${action}${duration ? ` (${duration}s)` : ""}${songTitle ? ` - ${songTitle}` : ""}`);
+            setStatus(`🎓 Send a MIDI message to map to: ${action}${duration ? ` (${duration}s)` : ""}${songTitle ? ` - ${songTitle}` : ""}`);
             window.electron?.startMidiLearning?.(action);
         });
     };
@@ -178,9 +245,14 @@ function App() {
                 // Send message to CLUI to start listening for song clicks
                 const iframe = document.querySelector("iframe");
                 if (iframe && iframe.contentWindow) {
-                    const targetOrigin = window.location.protocol === "file:"
-                        ? "https://clui.expo.app"
-                        : "http://localhost:8085";
+                    const targetOrigin = (() => {
+                        try {
+                            return new URL(iframeSrc).origin;
+                        }
+                        catch {
+                            return "*";
+                        }
+                    })();
                     iframe.contentWindow.postMessage({ type: "START_SONG_SELECTION_MODE" }, targetOrigin);
                 }
                 return;
@@ -268,9 +340,7 @@ function App() {
             backgroundColor: "#000",
             margin: 0,
             padding: 0,
-        }, children: [(0, jsx_runtime_1.jsx)("iframe", { id: "website-iframe", src: window.location.protocol === "file:"
-                    ? "https://clui.expo.app"
-                    : "http://localhost:8085", style: {
+        }, children: [(0, jsx_runtime_1.jsx)("iframe", { id: "website-iframe", src: iframeSrc, style: {
                     width: "100%",
                     height: "100%",
                     border: "0",
@@ -335,31 +405,27 @@ function App() {
                             padding: "20px",
                             maxHeight: "calc(100vh - 220px)",
                             overflowY: "auto",
-                        }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: "20px" }, children: [(0, jsx_runtime_1.jsx)("label", { style: {
+                        }, children: [(0, jsx_runtime_1.jsx)("div", { style: { marginBottom: "20px" }, children: (0, jsx_runtime_1.jsxs)("div", { style: {
+                                        padding: "12px",
+                                        backgroundColor: "rgba(0, 123, 255, 0.1)",
+                                        border: "1px solid rgba(0, 123, 255, 0.3)",
+                                        borderRadius: "8px",
+                                    }, children: [(0, jsx_runtime_1.jsx)("div", { style: {
+                                                fontSize: "12px",
+                                                color: "#007bff",
+                                                fontWeight: "600",
+                                                marginBottom: "6px",
+                                            }, children: "\uD83D\uDCA1 Software MIDI Integration" }), (0, jsx_runtime_1.jsx)("div", { style: {
+                                                fontSize: "11px",
+                                                color: "rgba(255, 255, 255, 0.9)",
+                                                lineHeight: "1.4",
+                                            }, children: "Configure your software (Ableton, ProPresenter, etc.) to send MIDI to \"Church Lobby Companion\". Create mappings below, then trigger them from your software." })] }) }), (0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: "20px" }, children: [(0, jsx_runtime_1.jsx)("label", { style: {
                                             display: "block",
                                             fontSize: "13px",
                                             fontWeight: "500",
                                             color: "rgba(255, 255, 255, 0.9)",
                                             marginBottom: "8px",
-                                        }, children: "MIDI Device" }), (0, jsx_runtime_1.jsxs)("select", { value: selectedDevice, onChange: (e) => {
-                                            setSelectedDevice(e.target.value);
-                                            connectToDevice(e.target.value);
-                                        }, style: {
-                                            width: "100%",
-                                            padding: "8px 12px",
-                                            backgroundColor: "rgba(255, 255, 255, 0.1)",
-                                            border: "1px solid rgba(255, 255, 255, 0.2)",
-                                            borderRadius: "6px",
-                                            color: "#fff",
-                                            fontSize: "13px",
-                                            outline: "none",
-                                        }, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "Select device..." }), devices.map((device) => ((0, jsx_runtime_1.jsx)("option", { value: device.id, style: { backgroundColor: "#000" }, children: device.name }, device.id)))] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: "20px" }, children: [(0, jsx_runtime_1.jsx)("label", { style: {
-                                            display: "block",
-                                            fontSize: "13px",
-                                            fontWeight: "500",
-                                            color: "rgba(255, 255, 255, 0.9)",
-                                            marginBottom: "8px",
-                                        }, children: "Create Mapping" }), (0, jsx_runtime_1.jsxs)("div", { style: {
+                                        }, children: "Create MIDI Mapping" }), (0, jsx_runtime_1.jsxs)("div", { style: {
                                             display: "grid",
                                             gridTemplateColumns: "1fr 1fr",
                                             gap: "8px",
@@ -600,9 +666,14 @@ function App() {
                                                 // Stop listening for song selection in CLUI
                                                 const iframe = document.querySelector("iframe");
                                                 if (iframe && iframe.contentWindow) {
-                                                    const targetOrigin = window.location.protocol === "file:"
-                                                        ? "https://clui.expo.app"
-                                                        : "http://localhost:8085";
+                                                    const targetOrigin = (() => {
+                                                        try {
+                                                            return new URL(iframeSrc).origin;
+                                                        }
+                                                        catch {
+                                                            return "*";
+                                                        }
+                                                    })();
                                                     iframe.contentWindow.postMessage({ type: "STOP_SONG_SELECTION_MODE" }, targetOrigin);
                                                 }
                                             }, style: {
@@ -628,7 +699,7 @@ function App() {
                                             fontSize: "11px",
                                             color: "rgba(255, 255, 255, 0.8)",
                                             marginBottom: "8px",
-                                        }, children: ["Press a key to map to: ", (0, jsx_runtime_1.jsx)("strong", { children: learningMode.action })] }), (0, jsx_runtime_1.jsx)("button", { onClick: stopLearning, style: {
+                                        }, children: ["Send a MIDI message to map to: ", (0, jsx_runtime_1.jsx)("strong", { children: learningMode.action })] }), (0, jsx_runtime_1.jsx)("button", { onClick: stopLearning, style: {
                                             padding: "4px 8px",
                                             backgroundColor: "rgba(255, 255, 255, 0.1)",
                                             color: "#fff",

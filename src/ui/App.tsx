@@ -25,6 +25,7 @@ interface Mapping {
   seconds?: number;
   songId?: string;
   songTitle?: string;
+  source?: "virtual" | "hardware"; // optional for backward compatibility
 }
 
 interface MidiDevice {
@@ -84,7 +85,7 @@ export default function App() {
         }
 
         // Last-resort dev URL (was previously hardcoded exp.direct). Skip if offline.
-        const previousTunnel = "https://wc19uzo-churchlobby-8081.exp.direct";
+        const previousTunnel = "https://wc19uzo-anonymous-8081.exp.direct";
         if (await probeUrl(previousTunnel)) {
           setIframeSrc(previousTunnel);
           return;
@@ -130,6 +131,7 @@ export default function App() {
   const [selectedDevice, setSelectedDevice] = useState<string>("");
   const [showMidiPanel, setShowMidiPanel] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [currentDevice, setCurrentDevice] = useState<string | null>(null);
   const [showDurationPicker, setShowDurationPicker] = useState<{
     action: string;
   } | null>(null);
@@ -145,6 +147,37 @@ export default function App() {
     artist?: string;
   } | null>(null);
   const [waitingForSongSelection, setWaitingForSongSelection] = useState(false);
+
+  const loadMidiDevices = async () => {
+    try {
+      const deviceList = await window.electron?.invoke?.('midi:get-devices') || [];
+      setDevices(deviceList);
+      
+      // Auto-connect to virtual port if no device selected
+      if (!selectedDevice && deviceList.length > 0) {
+        const virtualPort = deviceList.find((d: MidiDevice) => d.name?.toLowerCase().includes('virtual') || d.name?.toLowerCase().includes('church lobby'));
+        if (virtualPort) {
+          await connectToDevice(virtualPort);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load MIDI devices:', error);
+      setStatus('Failed to load MIDI devices');
+    }
+  };
+
+  const connectToDevice = async (device: MidiDevice) => {
+    try {
+      await window.electron?.invoke?.('midi:connect', device.id);
+      setSelectedDevice(device.id.toString());
+      setIsConnected(true);
+      setCurrentDevice(device.name);
+      setStatus(`Connected to ${device.name}`);
+    } catch (error) {
+      console.error('Failed to connect to device:', error);
+      setStatus(`Failed to connect to ${device.name}`);
+    }
+  };
 
   useEffect(() => {
     // Load MIDI devices on startup
@@ -163,23 +196,40 @@ export default function App() {
         );
 
         const newMapping: Mapping = {
-          id: `${Date.now()}-${result.note}`,
-          type: "note",
+          id: `${Date.now()}-${result.number}`,
+          type: (result.type as "note" | "cc") || "note",
           channel: result.channel,
-          number: result.note,
+          number: result.number ?? result.note,
           action: learningMode.action as any,
           seconds: calculatedSeconds,
           songId: learningMode.songId,
           songTitle: learningMode.songTitle,
+          // Tag mapping source; default to virtual if unspecified for safety
+          source:
+            result.source === "hardware"
+              ? "hardware"
+              : (result.source as "virtual" | undefined) || "virtual",
         };
 
         console.log(`🔥 Created mapping:`, newMapping);
 
         const updatedMappings = [...mappings, newMapping];
         setMappings(updatedMappings);
-        saveMappings(updatedMappings);
+        (async () => {
+          try {
+            await saveMappings(updatedMappings);
+            const reloaded = await window.electron?.invoke?.("map:get");
+            if (Array.isArray(reloaded)) setMappings(reloaded);
+          } catch {}
+        })();
+        const what =
+          (result.type === "cc"
+            ? `CC${result.number}`
+            : `Note${result.number ?? result.note}`) || "Message";
         setStatus(
-          `✅ Mapped Ch${result.channel} Note${result.note} → ${learningMode.action} (${calculatedSeconds}s)`
+          `✅ Mapped Ch${result.channel} ${what} → ${learningMode.action}${
+            calculatedSeconds ? ` (${calculatedSeconds}s)` : ""
+          }`
         );
         learningMode.resolve(newMapping);
         setLearningMode(null);
@@ -220,46 +270,6 @@ export default function App() {
     loadMappings();
   }, []);
 
-  const loadMidiDevices = async () => {
-    try {
-      const deviceList = await window.electron?.requestMidiDevices?.();
-      if (deviceList) {
-        setDevices(deviceList);
-        // Auto-connect to first available hardware device (only if not already connected)
-        const hardwareDevice = deviceList.find(
-          (d) => d.name !== "Virtual Port (for testing)"
-        );
-        if (hardwareDevice && !selectedDevice && !isConnected) {
-          setSelectedDevice(hardwareDevice.id.toString());
-          await connectToDevice(hardwareDevice.id.toString());
-        }
-      }
-    } catch (error) {
-      console.error("Failed to load MIDI devices:", error);
-    }
-  };
-
-  const connectToDevice = async (deviceId?: string) => {
-    const id = deviceId || selectedDevice;
-    if (id && !isConnected) {
-      try {
-        console.log(`Attempting to connect to device: ${id}`);
-        const success = await window.electron?.connectMidiDevice?.(id);
-        if (success) {
-          setIsConnected(true);
-          setStatus(`✅ Connected to MIDI device`);
-          console.log(`✅ Successfully connected to device: ${id}`);
-        } else {
-          setStatus(`❌ Connection failed`);
-          console.error(`❌ Failed to connect to device: ${id}`);
-        }
-      } catch (error) {
-        setStatus(`❌ Connection failed`);
-        console.error("Connection error:", error);
-      }
-    }
-  };
-
   const startLearning = (
     action: string,
     duration?: number,
@@ -269,7 +279,7 @@ export default function App() {
     return new Promise((resolve) => {
       setLearningMode({ action, resolve, duration, songId, songTitle });
       setStatus(
-        `🎓 Press a MIDI key to map to: ${action}${
+        `🎓 Send a MIDI message to map to: ${action}${
           duration ? ` (${duration}s)` : ""
         }${songTitle ? ` - ${songTitle}` : ""}`
       );
@@ -533,47 +543,36 @@ export default function App() {
               overflowY: "auto",
             }}
           >
-            {/* Device Connection */}
+            {/* Software MIDI Instructions */}
             <div style={{ marginBottom: "20px" }}>
-              <label
+              <div
                 style={{
-                  display: "block",
-                  fontSize: "13px",
-                  fontWeight: "500",
-                  color: "rgba(255, 255, 255, 0.9)",
-                  marginBottom: "8px",
+                  padding: "12px",
+                  backgroundColor: "rgba(0, 123, 255, 0.1)",
+                  border: "1px solid rgba(0, 123, 255, 0.3)",
+                  borderRadius: "8px",
                 }}
               >
-                MIDI Device
-              </label>
-              <select
-                value={selectedDevice}
-                onChange={(e) => {
-                  setSelectedDevice(e.target.value);
-                  connectToDevice(e.target.value);
-                }}
-                style={{
-                  width: "100%",
-                  padding: "8px 12px",
-                  backgroundColor: "rgba(255, 255, 255, 0.1)",
-                  border: "1px solid rgba(255, 255, 255, 0.2)",
-                  borderRadius: "6px",
-                  color: "#fff",
-                  fontSize: "13px",
-                  outline: "none",
-                }}
-              >
-                <option value="">Select device...</option>
-                {devices.map((device) => (
-                  <option
-                    key={device.id}
-                    value={device.id}
-                    style={{ backgroundColor: "#000" }}
-                  >
-                    {device.name}
-                  </option>
-                ))}
-              </select>
+                <div
+                  style={{
+                    fontSize: "12px",
+                    color: "#007bff",
+                    fontWeight: "600",
+                    marginBottom: "6px",
+                  }}
+                >
+                  💡 Software MIDI Integration
+                </div>
+                <div
+                  style={{
+                    fontSize: "11px",
+                    color: "rgba(255, 255, 255, 0.9)",
+                    lineHeight: "1.4",
+                  }}
+                >
+                  Configure your software (Ableton, ProPresenter, etc.) to send MIDI to "Church Lobby Companion". Create mappings below, then trigger them from your software.
+                </div>
+              </div>
             </div>
 
             {/* Quick Actions */}
@@ -587,7 +586,7 @@ export default function App() {
                   marginBottom: "8px",
                 }}
               >
-                Create Mapping
+                Create MIDI Mapping
               </label>
               <div
                 style={{
@@ -849,6 +848,8 @@ export default function App() {
               </div>
             )}
 
+            {/* ... */}
+
             {/* Song Picker Modal */}
             {showSongPicker && (
               <div
@@ -1089,7 +1090,7 @@ export default function App() {
                     marginBottom: "8px",
                   }}
                 >
-                  Press a key to map to: <strong>{learningMode.action}</strong>
+                  Send a MIDI message to map to: <strong>{learningMode.action}</strong>
                 </div>
                 <button
                   onClick={stopLearning}
