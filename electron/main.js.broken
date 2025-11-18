@@ -105,6 +105,8 @@ function createVirtualPort() {
   }
 }
 
+//
+
 function openInput(index) {
   if (input) {
     try {
@@ -274,9 +276,10 @@ app.whenReady().then(async () => {
 
   // Setup all IPC handlers after app is ready
   ipcMain.handle("midi:open", (_e, idx) => openInput(idx));
-  ipcMain.handle("midi:get-devices", () => listMidiInputs());
-  ipcMain.handle("midi:connect", (_e, deviceId) => {
-    return openInput(deviceId);
+  ipcMain.handle("midi-get-devices", () => listMidiInputs());
+  ipcMain.handle("midi-connect", (_e, device) => {
+    const deviceIndex = typeof device.id === 'string' ? device.id : device.id.toString();
+    return openInput(deviceIndex);
   });
   
   // Learning mode handlers
@@ -369,7 +372,6 @@ app.whenReady().then(async () => {
 
   createWindow();
 });
-
 app.on("window-all-closed", () => {
   // Clean up MIDI ports
   if (input) {
@@ -384,3 +386,5 @@ app.on("window-all-closed", () => {
   }
   if (process.platform !== "darwin") app.quit();
 });
+
+//

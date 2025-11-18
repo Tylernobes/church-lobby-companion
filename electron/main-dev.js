@@ -22,6 +22,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload-dev.js"),
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false,
     },
     resizable: true,
     minWidth: 375,

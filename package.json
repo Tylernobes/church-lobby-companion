@@ -1,18 +1,22 @@
 {
   "name": "church-lobby-companion",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"electron electron/main-dev.js\"",
     "build": "vite build && tsc -p tsconfig.json && electron-builder",
+    "build:universal": "vite build && tsc -p tsconfig.json && electron-builder --mac --universal",
+    "build:intel": "vite build && tsc -p tsconfig.json && electron-builder --mac --x64",
+    "build:silicon": "vite build && tsc -p tsconfig.json && electron-builder --mac --arm64",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "electron ."
   },
   "build": {
     "appId": "com.churchlobby.companion",
-    "productName": "Church Lobby Companion",
+    "productName": "Church Lobby",
     "icon": "assets/icon",
+    "asar": false,
     "files": [
       "electron/**/*",
       "dist/renderer/**/*"
@@ -33,7 +37,7 @@
       "identity": "Tyler Nobes (7T6ZP3UT35)",
       "entitlements": "entitlements.mac.plist",
       "hardenedRuntime": true,
-      "notarize": false,
+      "gatekeeperAssess": false,
       "target": [
         {
           "target": "dmg",
