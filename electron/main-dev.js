@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("node:path");
 const midi = require("@julusian/midi");
 
@@ -23,6 +23,8 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       backgroundThrottling: false,
+      // Enable persistent storage for login sessions
+      partition: "persist:church-lobby",
     },
     resizable: true,
     minWidth: 375,
@@ -347,6 +349,18 @@ app.whenReady().then(async () => {
 
   createWindow();
 });
+
+// Handle opening external URLs
+ipcMain.handle("open-external", async (event, url) => {
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to open external URL:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 app.on("window-all-closed", () => {
   // Clean up MIDI ports
   if (input) {

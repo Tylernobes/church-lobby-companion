@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld("electron", {
   },
   removeAllListeners: (event) => ipcRenderer.removeAllListeners(event),
   invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+  openExternal: (url) => ipcRenderer.invoke("open-external", url),
 });
 
 // Removed cross-origin iframe DOM injection. We rely solely on postMessage bridging.

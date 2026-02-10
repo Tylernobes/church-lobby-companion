@@ -1,9 +1,10 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, powerSaveBlocker, shell, session } = require("electron");
 const path = require("node:path");
 const midi = require("@julusian/midi");
 
 let win = null;
 let kv = null;
+let powerSaveBlockerId = null;
 
 async function initStore() {
   if (!kv) {
@@ -23,6 +24,10 @@ function createWindow() {
       contextIsolation: true,
       // Ensure timers/animation don't throttle when window is unfocused/occluded
       backgroundThrottling: false,
+      // Enable persistent storage for login sessions
+      partition: "persist:church-lobby",
+      // Disable web security to allow iframe cross-origin requests (Firebase Storage, etc.)
+      webSecurity: false,
     },
     resizable: true,
     minWidth: 375,
@@ -149,12 +154,6 @@ function onMidi(message) {
   const NOTE_OFF = 0x80;
   const CC = 0xb0;
 
-  console.log(
-    `MIDI: Type=${messageType.toString(
-      16
-    )}, Channel=${channel}, Note=${note}, Velocity=${velocity}`
-  );
-
   // Send MIDI info to UI in real-time
   if (win) {
     win.webContents.send("midi:message", {
@@ -165,12 +164,6 @@ function onMidi(message) {
       velocity,
       timestamp: Date.now(),
     });
-  }
-
-  // Check learning mode status
-  console.log(`Learning mode active: ${!!learningMode}`);
-  if (learningMode) {
-    console.log(`Learning mode details:`, learningMode);
   }
 
   // Learning: original behavior—Note On only, original payload shape
@@ -190,44 +183,32 @@ function onMidi(message) {
 
   // Dispatch mappings for Note On (any velocity), Note Off, or CC (value > 0)
   if (messageType === NOTE_ON) {
-    console.log(
-      `🎹 Note On: Channel ${channel}, Note ${note}, Velocity ${velocity}`
-    );
     if (kv) {
       const mappings = kv.get("mappings") || [];
       const mapping = mappings.find(
         (m) => m.type === "note" && m.channel === channel && m.number === note
       );
       if (mapping) {
-        console.log(`✅ Found mapping for Note ${note}:`, mapping);
         dispatchMappedAction(mapping);
       }
     }
   } else if (messageType === NOTE_OFF) {
-    console.log(
-      `🔻 Note Off: Channel ${channel}, Note ${note}, Velocity ${velocity}`
-    );
     if (kv) {
       const mappings = kv.get("mappings") || [];
       const mapping = mappings.find(
         (m) => m.type === "note" && m.channel === channel && m.number === note
       );
       if (mapping) {
-        console.log(`✅ Found mapping for NoteOff ${note}:`, mapping);
         dispatchMappedAction(mapping);
       }
     }
   } else if (messageType === CC && velocity >= 0) {
-    console.log(
-      `🎛️ Control Change: Channel ${channel}, CC ${note}, Value ${velocity}`
-    );
     if (kv) {
       const mappings = kv.get("mappings") || [];
       const mapping = mappings.find(
         (m) => m.type === "cc" && m.channel === channel && m.number === note
       );
       if (mapping) {
-        console.log(`✅ Found mapping for CC ${note}:`, mapping);
         dispatchMappedAction(mapping);
       }
     }
@@ -236,7 +217,6 @@ function onMidi(message) {
 
 function dispatchMappedAction(mapping) {
   const seconds = typeof mapping.seconds === "number" ? mapping.seconds : 10;
-  console.log(`Dispatching action: ${mapping.action} (${seconds}s)`);
 
   switch (mapping.action) {
     case "fadeIn":
@@ -262,7 +242,6 @@ function dispatchMappedAction(mapping) {
 }
 
 function postToWebsite(channel, payload) {
-  console.log("Posting to website:", channel, payload);
   if (win && win.webContents) {
     // Forward to renderer; preload will forward to the iframe via postMessage.
     win.webContents.send(channel, payload);
@@ -271,6 +250,29 @@ function postToWebsite(channel, payload) {
 
 app.whenReady().then(async () => {
   await initStore();
+
+  // Configure session for persistent storage
+  const ses = session.fromPartition('persist:church-lobby');
+  
+  // Grant storage permissions
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'persistent-storage' || permission === 'storage') {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
+  
+  ses.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    if (permission === 'persistent-storage' || permission === 'storage') {
+      return true;
+    }
+    return false;
+  });
+
+  // Prevent App Nap and system sleep to avoid gray screen issue
+  powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  console.log(`Power save blocker active: ${powerSaveBlocker.isStarted(powerSaveBlockerId)}`);
 
   // Setup all IPC handlers after app is ready
   ipcMain.handle("midi:open", (_e, idx) => openInput(idx));
@@ -370,6 +372,17 @@ app.whenReady().then(async () => {
   createWindow();
 });
 
+// Handle opening external URLs
+ipcMain.handle("open-external", async (event, url) => {
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to open external URL:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 app.on("window-all-closed", () => {
   // Clean up MIDI ports
   if (input) {
@@ -381,6 +394,11 @@ app.on("window-all-closed", () => {
     try {
       virtualInput.closePort();
     } catch {}
+  }
+  // Stop power save blocker
+  if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+    powerSaveBlocker.stop(powerSaveBlockerId);
+    console.log('Power save blocker stopped');
   }
   if (process.platform !== "darwin") app.quit();
 });

@@ -13,7 +13,7 @@ exports.default = async function notarizing(context) {
   const appName = context.packager.appInfo.productFilename;
 
   // API Key method (recommended)
-  const appleApiKey = process.env.APPLE_API_KEY || "/Users/tyler/Documents/App Build/AuthKey_TGZQHAB68V.p8";
+  const appleApiKey = process.env.APPLE_API_KEY || "/Users/tyler/Documents/App/AuthKey_TGZQHAB68V.p8";
   const appleApiKeyId = process.env.APPLE_API_KEY_ID || "TGZQHAB68V";
   const appleApiIssuer = process.env.APPLE_API_ISSUER_ID || "dfca6c2d-1c83-4780-b61b-f528cecd2605";
   const teamId = process.env.APPLE_TEAM_ID || "7T6ZP3UT35";

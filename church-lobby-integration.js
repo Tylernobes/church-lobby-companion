@@ -258,8 +258,7 @@ export function useChurchLobbyIntegration() {
 
     // Listen for command events
     const handleChurchLobbyCommand = async (event) => {
-      const { type, seconds = 10 } = event.detail || {};
-      console.log("Received Church Lobby command:", type, seconds);
+      const { type, seconds = 10, songId, songTitle } = event.detail || {};
 
       switch (type) {
         case "fadeIn":
@@ -270,6 +269,14 @@ export function useChurchLobbyIntegration() {
         case "fadeOut":
           console.log(`🔇 Executing fade out over ${seconds} seconds...`);
           await fadeOutWithVolume(seconds);
+          break;
+
+        case "selectAndFadeIn":
+          console.log(`🎵 Selecting song ${songId} (${songTitle}) and fading in over ${seconds} seconds...`);
+          if (window.miniPlayerCommands?.selectSong) {
+            await window.miniPlayerCommands.selectSong(songId);
+          }
+          await fadeInWithVolume(seconds);
           break;
 
         case "stop":
@@ -285,8 +292,8 @@ export function useChurchLobbyIntegration() {
     // Listen for postMessage commands
     const handlePostMessage = (event) => {
       if (event.data?.type === "CHURCH_LOBBY_COMMAND") {
-        const { command, seconds } = event.data;
-        handleChurchLobbyCommand({ detail: { type: command, seconds } });
+        const { command, seconds, songId, songTitle } = event.data;
+        handleChurchLobbyCommand({ detail: { type: command, seconds, songId, songTitle } });
       }
     };
 
@@ -337,13 +344,7 @@ export function setupChurchLobbyIntegration(miniPlayerContext) {
   };
 
   const handleCommand = async (event) => {
-    const { type, seconds = 10 } = event.detail || {};
-
-    console.log(`🔥 DEBUG: handleCommand called with:`, {
-      type,
-      seconds,
-      eventDetail: event.detail,
-    });
+    const { type, seconds = 10, songId, songTitle } = event.detail || {};
 
     switch (type) {
       case "fadeIn":
@@ -353,6 +354,13 @@ export function setupChurchLobbyIntegration(miniPlayerContext) {
       case "fadeOut":
         console.log(`🔇 Executing fade out over ${seconds} seconds...`);
         await fadeOutWithVolume(seconds);
+        break;
+      case "selectAndFadeIn":
+        console.log(`🎵 Selecting song ${songId} (${songTitle}) and fading in over ${seconds} seconds...`);
+        if (window.miniPlayerCommands?.selectSong) {
+          await window.miniPlayerCommands.selectSong(songId);
+        }
+        await fadeInWithVolume(seconds);
         break;
       case "stop":
         await pause();
@@ -364,16 +372,11 @@ export function setupChurchLobbyIntegration(miniPlayerContext) {
   window.addEventListener("message", (event) => {
     if (event.data?.type === "CHURCH_LOBBY_COMMAND") {
       handleCommand({
-        detail: { type: event.data.command, seconds: event.data.seconds },
+        detail: { type: event.data.command, seconds: event.data.seconds, songId: event.data.songId, songTitle: event.data.songTitle },
       });
     } else if (event.data?.type === "AUDIO_COMMAND") {
-      // Handle MIDI commands from desktop app
-      console.log(
-        `🎹 Received AUDIO_COMMAND: ${event.data.command} (${event.data.seconds}s)`
-      );
-      console.log(`🔥 DEBUG: AUDIO_COMMAND data:`, event.data);
       handleCommand({
-        detail: { type: event.data.command, seconds: event.data.seconds },
+        detail: { type: event.data.command, seconds: event.data.seconds, songId: event.data.songId, songTitle: event.data.songTitle },
       });
     }
   });
