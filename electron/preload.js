@@ -2,13 +2,11 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 // Relay desktop → web page commands
 ipcRenderer.on("cl:command", (_e, payload) => {
-  console.log("Preload received cl:command:", payload);
   window.postMessage({ channel: "cl:command", payload });
 
   // Also try direct iframe forwarding
   const iframe = document.querySelector("iframe");
   if (iframe && iframe.contentWindow) {
-    console.log("Forwarding to iframe...");
     try {
       // Legacy debug message (no-op for CLUI)
       iframe.contentWindow.postMessage({ channel: "cl:command", payload }, "*");
@@ -22,12 +20,9 @@ ipcRenderer.on("cl:command", (_e, payload) => {
         songTitle: payload?.songTitle,
       };
       iframe.contentWindow.postMessage(audioCommand, "*");
-      console.log("Successfully forwarded to iframe");
     } catch (error) {
       console.error("Error forwarding to iframe:", error);
     }
-  } else {
-    console.log("No iframe found to forward to");
   }
 });
 
@@ -74,6 +69,7 @@ contextBridge.exposeInMainWorld("electron", {
   },
   removeAllListeners: (event) => ipcRenderer.removeAllListeners(event),
   invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+  openExternal: (url) => ipcRenderer.invoke("open-external", url),
 });
 
 // Removed cross-origin iframe DOM injection. We rely solely on postMessage bridging.

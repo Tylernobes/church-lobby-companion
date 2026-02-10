@@ -11,6 +11,7 @@ declare global {
       onMidiMessage?: (callback: (event: any, message: any) => void) => void;
       removeAllListeners?: (event: string) => void;
       invoke?: (channel: string, ...args: any[]) => Promise<any>;
+      openExternal?: (url: string) => Promise<void>;
     };
   }
 }
@@ -148,6 +149,16 @@ export default function App() {
   } | null>(null);
   const [waitingForSongSelection, setWaitingForSongSelection] = useState(false);
 
+  // Subscription status from iframe
+  const [subscriptionStatus, setSubscriptionStatus] = useState<{
+    canUseDesktopApp: boolean;
+    canUseFadeControls: boolean;
+    isPro: boolean;
+    isSolo: boolean;
+    plan: string | null;
+  } | null>(null);
+  const [subscriptionChecked, setSubscriptionChecked] = useState(false);
+
   const loadMidiDevices = async () => {
     try {
       const deviceList = await window.electron?.invoke?.('midi:get-devices') || [];
@@ -183,8 +194,33 @@ export default function App() {
     // Load MIDI devices on startup
     loadMidiDevices();
 
+    // Request subscription status from iframe
+    const requestSubscriptionStatus = () => {
+      const iframe = document.getElementById("website-iframe") as HTMLIFrameElement;
+      if (iframe?.contentWindow) {
+        iframe.contentWindow.postMessage({ type: "get-subscription-status" }, "*");
+      }
+    };
+
+    // Initial request after short delay to ensure iframe is loaded
+    const initialTimer = setTimeout(requestSubscriptionStatus, 2000);
+
+    // Poll for subscription status every 4 hours
+    const pollTimer = setInterval(requestSubscriptionStatus, 4 * 60 * 60 * 1000);
+
+    // Also check when window gains focus (user returns from browser)
+    const handleFocus = () => requestSubscriptionStatus();
+    window.addEventListener("focus", handleFocus);
+
     // Listen for MIDI messages via postMessage (from preload)
     const handlePostMessage = (event: MessageEvent) => {
+      // Handle subscription status response
+      if (event.data?.type === "subscription-status") {
+        console.log("📊 Received subscription status:", event.data.payload);
+        setSubscriptionStatus(event.data.payload);
+        setSubscriptionChecked(true);
+      }
+
       if (event.data?.type === "midi:learning-result" && learningMode) {
         const result = event.data.payload;
         const calculatedSeconds =
@@ -260,6 +296,9 @@ export default function App() {
     window.addEventListener("message", handlePostMessage);
 
     return () => {
+      clearTimeout(initialTimer);
+      clearInterval(pollTimer);
+      window.removeEventListener("focus", handleFocus);
       window.removeEventListener("message", handlePostMessage);
       window.electron?.removeAllListeners?.("midi:message");
     };
@@ -522,6 +561,88 @@ export default function App() {
             animation: "slideIn 0.3s ease-out",
           }}
         >
+          {/* Check subscription status */}
+          {!subscriptionChecked && (
+            <div style={{ padding: "20px", textAlign: "center" }}>
+              <div style={{ color: "rgba(255, 255, 255, 0.6)", fontSize: "13px" }}>
+                🔄 Checking subscription status...
+              </div>
+            </div>
+          )}
+
+          {subscriptionChecked && !subscriptionStatus?.canUseDesktopApp && (
+            <div style={{ padding: "20px" }}>
+              <div style={{
+                backgroundColor: "rgba(138, 43, 226, 0.1)",
+                border: "1px solid rgba(138, 43, 226, 0.3)",
+                borderRadius: "12px",
+                padding: "20px",
+                textAlign: "center",
+              }}>
+                <div style={{
+                  fontSize: "32px",
+                  marginBottom: "12px",
+                }}>🎹</div>
+                <div style={{
+                  fontSize: "16px",
+                  fontWeight: "600",
+                  color: "#8a2be2",
+                  marginBottom: "8px",
+                }}>
+                  Pro Feature
+                </div>
+                <div style={{
+                  fontSize: "13px",
+                  color: "rgba(255, 255, 255, 0.7)",
+                  marginBottom: "16px",
+                  lineHeight: "1.5",
+                }}>
+                  MIDI control requires a Pro subscription.
+                  <br />
+                  Upgrade to unlock this feature.
+                </div>
+                <button
+                  onClick={async () => {
+                    console.log("Upgrade button clicked");
+                    
+                    // Try electron API first
+                    if (window.electron?.openExternal) {
+                      console.log("Using electron.openExternal");
+                      await window.electron.openExternal("https://churchlobbymusic.net/profile");
+                    } 
+                    // Fallback: use window.open as a workaround
+                    else {
+                      console.log("Fallback: using window.open");
+                      window.open("https://churchlobbymusic.net/profile", "_blank");
+                    }
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: "12px 16px",
+                    backgroundColor: "rgba(138, 43, 226, 0.8)",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: "8px",
+                    cursor: "pointer",
+                    fontSize: "14px",
+                    fontWeight: "600",
+                    transition: "all 0.2s ease",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = "rgba(138, 43, 226, 1)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "rgba(138, 43, 226, 0.8)";
+                  }}
+                >
+                  Upgrade to Pro
+                </button>
+              </div>
+            </div>
+          )}
+
+          {subscriptionChecked && subscriptionStatus?.canUseDesktopApp && (
+          <>
           <style>{`
             @keyframes slideIn {
               from {
@@ -1340,6 +1461,8 @@ export default function App() {
               </div>
             </div>
           </div>
+          </>
+          )}
         </div>
       )}
     </div>

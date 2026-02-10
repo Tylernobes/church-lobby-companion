@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, session } = require("electron");
 const path = require("node:path");
 const midi = require("@julusian/midi");
 
@@ -23,6 +23,10 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       backgroundThrottling: false,
+      // Enable persistent storage for login sessions
+      partition: "persist:church-lobby",
+      // Disable web security to allow iframe cross-origin requests in dev
+      webSecurity: false,
     },
     resizable: true,
     minWidth: 375,
@@ -342,11 +346,70 @@ ipcMain.handle("midi:stop-learning", async () => {
 app.whenReady().then(async () => {
   await initStore();
 
+  // Configure session for persistent storage
+  const ses = session.fromPartition('persist:church-lobby');
+  console.log('📦 Session partition configured:', ses.getUserAgent());
+  
+  // Grant storage permissions for main session
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    console.log(`🔐 [persist:church-lobby] Permission requested: ${permission} from ${webContents.getURL()}`);
+    if (permission === 'persistent-storage' || permission === 'storage') {
+      console.log(`✅ Granted ${permission}`);
+      callback(true);
+      return;
+    }
+    console.log(`❌ Denied ${permission}`);
+    callback(false);
+  });
+  
+  ses.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    console.log(`🔍 [persist:church-lobby] Permission check: ${permission} from ${requestingOrigin}`);
+    if (permission === 'persistent-storage' || permission === 'storage') {
+      return true;
+    }
+    return false;
+  });
+
+  // ALSO configure the default session for iframes (they don't inherit parent partition)
+  const defaultSession = session.defaultSession;
+  console.log('📦 Configuring default session for iframe storage');
+  
+  defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    console.log(`🔐 [default] Permission requested: ${permission} from ${webContents.getURL()}`);
+    if (permission === 'persistent-storage' || permission === 'storage') {
+      console.log(`✅ [default] Granted ${permission}`);
+      callback(true);
+      return;
+    }
+    console.log(`❌ [default] Denied ${permission}`);
+    callback(false);
+  });
+  
+  defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    console.log(`🔍 [default] Permission check: ${permission} from ${requestingOrigin}`);
+    if (permission === 'persistent-storage' || permission === 'storage') {
+      return true;
+    }
+    return false;
+  });
+
   // Create virtual MIDI port for Ableton to connect to
   createVirtualPort();
 
   createWindow();
 });
+
+// Handle opening external URLs
+ipcMain.handle("open-external", async (event, url) => {
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to open external URL:", error);
+    return { success: false, error: error.message };
+  }
+});
+
 app.on("window-all-closed", () => {
   // Clean up MIDI ports
   if (input) {
