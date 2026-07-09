@@ -687,10 +687,16 @@ function dispatchMappedAction(mapping) {
       break;
     case "launchPlaylist":
       if (mapping.playlistId) {
+        const startSongId =
+          mapping.songId ||
+          (Array.isArray(mapping.queueSongIds) && mapping.queueSongIds.length
+            ? mapping.queueSongIds[0]
+            : undefined);
         postToClui({
           type: "launchPlaylist",
           seconds,
-          startSongId: mapping.songId,
+          songId: startSongId,
+          startSongId,
           playlistTitle: mapping.playlistTitle,
           playlistId: mapping.playlistId,
           queueSongIds: mapping.queueSongIds,
@@ -699,10 +705,16 @@ function dispatchMappedAction(mapping) {
       break;
     case "launchAlbum":
       if (mapping.albumId) {
+        const startSongId =
+          mapping.songId ||
+          (Array.isArray(mapping.queueSongIds) && mapping.queueSongIds.length
+            ? mapping.queueSongIds[0]
+            : undefined);
         postToClui({
           type: "launchAlbum",
           seconds,
-          startSongId: mapping.songId,
+          songId: startSongId,
+          startSongId,
           albumTitle: mapping.albumTitle,
           albumId: mapping.albumId,
           queueSongIds: mapping.queueSongIds,
