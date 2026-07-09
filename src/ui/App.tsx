@@ -79,7 +79,7 @@ export default function App() {
   const getActionTone = (action: Mapping["action"]) => {
     switch (action) {
       case "fadeIn":
-        return { border: "rgba(40, 167, 69, 0.5)", chip: "rgba(40, 167, 69, 0.22)", text: "#7ee09a" };
+        return { border: "rgba(236, 72, 153, 0.55)", chip: "rgba(236, 72, 153, 0.2)", text: "#ff8bc9" };
       case "fadeOut":
         return { border: "rgba(255, 193, 7, 0.55)", chip: "rgba(255, 193, 7, 0.2)", text: "#ffd04e" };
       case "stop":
@@ -239,6 +239,9 @@ export default function App() {
       .map((action) => ({ action, count: counts.get(action) || 0 }))
       .filter((entry) => entry.count > 0);
   }, [mappings]);
+  const durationPickerTone = showDurationPicker
+    ? getActionTone(showDurationPicker.action as Mapping["action"])
+    : null;
   const songPickerDraftHydratedRef = React.useRef(false);
 
   // Subscription status from iframe
@@ -408,24 +411,33 @@ export default function App() {
     waitingForAlbumSelection,
   ]);
 
-  useEffect(() => {
+  const openMidiPanel = React.useCallback(() => {
     window.electron
-      ?.invoke?.("overlay:set-expanded", showMidiPanel)
+      ?.invoke?.("overlay:set-expanded", true)
+      .then(() => {
+        requestAnimationFrame(() => setShowMidiPanel(true));
+      })
+      .catch((err) => {
+        console.warn("Failed to sync overlay bounds:", err);
+        setShowMidiPanel(true);
+      });
+  }, []);
+
+  const closeMidiPanel = React.useCallback(() => {
+    setShowMidiPanel(false);
+    window.electron
+      ?.invoke?.("overlay:set-expanded", false)
       .catch((err) => {
         console.warn("Failed to sync overlay bounds:", err);
       });
-  }, [showMidiPanel]);
+  }, []);
 
   const toggleMidiPanel = () => {
-    setShowMidiPanel((prev) => {
-      const next = !prev;
-      window.electron
-        ?.invoke?.("overlay:set-expanded", next)
-        .catch((err) => {
-          console.warn("Failed to sync overlay bounds:", err);
-        });
-      return next;
-    });
+    if (showMidiPanel) {
+      closeMidiPanel();
+      return;
+    }
+    openMidiPanel();
   };
 
   const loadMidiDevices = async () => {
@@ -487,6 +499,20 @@ export default function App() {
         console.log("📊 Received subscription status:", event.data.payload);
         setSubscriptionStatus(event.data.payload);
         setSubscriptionChecked(true);
+      }
+
+      if (event.data?.type === "overlay:toggle-midi-panel") {
+        if (event.data?.expanded) {
+          requestAnimationFrame(() => setShowMidiPanel(true));
+        } else {
+          setShowMidiPanel(false);
+        }
+        return;
+      }
+
+      if (event.data?.type === "overlay:open-midi-panel") {
+        requestAnimationFrame(() => setShowMidiPanel(true));
+        return;
       }
 
       if (event.data?.type === "midi:learning-result" && learningMode) {
@@ -934,55 +960,66 @@ export default function App() {
           zIndex: 1000,
         }}
       >
-        {/* Hamburger Menu Button */}
+        {/* MIDI Mapping Toggle Button */}
         <button
           onClick={toggleMidiPanel}
           style={{
-            width: "44px",
+            minWidth: "160px",
             height: "44px",
+            padding: "0 12px",
             backgroundColor: "rgba(0, 0, 0, 0.8)",
-            border: "1px solid rgba(255, 255, 255, 0.2)",
+            border: showMidiPanel
+              ? "1px solid rgba(13, 202, 240, 0.6)"
+              : "1px solid rgba(255, 255, 255, 0.2)",
             borderRadius: "8px",
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
+            justifyContent: "space-between",
+            gap: "10px",
             backdropFilter: "blur(10px)",
             transition: "all 0.2s ease",
             boxShadow: showMidiPanel
-              ? "0 4px 12px rgba(0, 0, 0, 0.4)"
+              ? "0 4px 14px rgba(13, 202, 240, 0.25)"
               : "0 2px 6px rgba(0, 0, 0, 0.3)",
           }}
+          title={showMidiPanel ? "Hide MIDI Mapping" : "Open MIDI Mapping (CMD+M)"}
           onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = "rgba(0, 0, 0, 0.9)";
-            e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.3)";
+            e.currentTarget.style.backgroundColor = "rgba(8, 21, 28, 0.92)";
+            e.currentTarget.style.borderColor = "rgba(13, 202, 240, 0.7)";
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.backgroundColor = "rgba(0, 0, 0, 0.8)";
-            e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.2)";
+            e.currentTarget.style.borderColor = showMidiPanel
+              ? "rgba(13, 202, 240, 0.6)"
+              : "rgba(255, 255, 255, 0.2)";
           }}
         >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="rgba(255, 255, 255, 0.9)"
-            strokeWidth="2"
+          <span
             style={{
-              transition: "transform 0.2s ease",
+              color: showMidiPanel ? "#66dff7" : "rgba(255, 255, 255, 0.95)",
+              fontSize: "12px",
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              lineHeight: 1,
             }}
           >
-            {showMidiPanel ? (
-              <path d="M18 6L6 18M6 6l12 12" />
-            ) : (
-              <>
-                <path d="M3 12h18" />
-                <path d="M3 6h18" />
-                <path d="M3 18h18" />
-              </>
-            )}
-          </svg>
+            MIDI Mapping
+          </span>
+          <span
+            style={{
+              color: "rgba(255, 255, 255, 0.72)",
+              border: "1px solid rgba(255, 255, 255, 0.22)",
+              borderRadius: "999px",
+              padding: "3px 8px",
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+            }}
+          >
+            CMD+M
+          </span>
         </button>
       </div>
 
@@ -1002,7 +1039,8 @@ export default function App() {
             boxShadow: "0 8px 32px rgba(0, 0, 0, 0.5)",
             zIndex: 999,
             overflow: "hidden",
-            animation: "slideIn 0.3s ease-out",
+            transformOrigin: "top right",
+            animation: "fadePanelIn 0.18s ease-out",
           }}
         >
           {/* Check subscription status */}
@@ -1088,14 +1126,12 @@ export default function App() {
           {subscriptionChecked && subscriptionStatus?.canUseDesktopApp && (
           <>
           <style>{`
-            @keyframes slideIn {
+            @keyframes fadePanelIn {
               from {
                 opacity: 0;
-                transform: translateY(-10px) scale(0.95);
               }
               to {
                 opacity: 1;
-                transform: translateY(0) scale(1);
               }
             }
           `}</style>
@@ -1119,7 +1155,7 @@ export default function App() {
                   marginBottom: "8px",
                 }}
               >
-                MIDI Input Device
+                Connected devices
               </label>
               <div
                 style={{
@@ -1146,9 +1182,6 @@ export default function App() {
                     fontSize: "12px",
                   }}
                 >
-                  <option value="" style={{ backgroundColor: "#1a1a1a" }}>
-                    Select device...
-                  </option>
                   {devices.map((device) => (
                     <option
                       key={String(device.id)}
@@ -1175,19 +1208,6 @@ export default function App() {
                 >
                   Refresh
                 </button>
-              </div>
-              <div
-                style={{
-                  marginTop: "8px",
-                  fontSize: "11px",
-                  color: isConnected
-                    ? "#4cd964"
-                    : "rgba(255, 255, 255, 0.6)",
-                }}
-              >
-                {isConnected
-                  ? `Connected: ${currentDevice || "Unknown device"}`
-                  : "Not connected. Select a hardware device or use Virtual Port for software MIDI."}
               </div>
             </div>
 
@@ -1283,8 +1303,8 @@ export default function App() {
                 style={{
                   marginBottom: "20px",
                   padding: "16px",
-                  backgroundColor: "rgba(255, 193, 7, 0.1)",
-                  border: "1px solid rgba(255, 193, 7, 0.3)",
+                  backgroundColor: durationPickerTone?.chip || "rgba(255, 193, 7, 0.1)",
+                  border: `1px solid ${durationPickerTone?.border || "rgba(255, 193, 7, 0.3)"}`,
                   borderRadius: "12px",
                   backdropFilter: "blur(10px)",
                 }}
@@ -1293,7 +1313,7 @@ export default function App() {
                   style={{
                     fontSize: "14px",
                     fontWeight: "600",
-                    color: "#ffc107",
+                    color: durationPickerTone?.text || "#ffc107",
                     marginBottom: "8px",
                     display: "flex",
                     alignItems: "center",
@@ -1335,9 +1355,9 @@ export default function App() {
                       }
                       style={{
                         padding: "10px",
-                        backgroundColor: "rgba(255, 193, 7, 0.8)",
-                        color: "#000",
-                        border: "none",
+                        backgroundColor: durationPickerTone?.chip || "rgba(255, 193, 7, 0.8)",
+                        color: durationPickerTone?.text || "#000",
+                        border: `1px solid ${durationPickerTone?.border || "rgba(255, 193, 7, 0.8)"}`,
                         borderRadius: "6px",
                         cursor: "pointer",
                         fontSize: "12px",
@@ -1397,7 +1417,7 @@ export default function App() {
                         parseFloat(customDuration) < 0.5 ||
                         parseFloat(customDuration) > 60
                           ? "rgba(255, 255, 255, 0.1)"
-                          : "rgba(40, 167, 69, 0.8)",
+                          : durationPickerTone?.border || "rgba(40, 167, 69, 0.8)",
                       color: "#fff",
                       border: "none",
                       borderRadius: "6px",
@@ -2219,9 +2239,9 @@ export default function App() {
                           }
                           style={{
                             padding: "2px 6px",
-                            backgroundColor: "rgba(255, 193, 7, 0.8)",
-                            color: "#000",
-                            border: "none",
+                            backgroundColor: tone.chip,
+                            color: tone.text,
+                            border: `1px solid ${tone.border}`,
                             borderRadius: "3px",
                             fontSize: "10px",
                             cursor: "pointer",
@@ -2250,8 +2270,8 @@ export default function App() {
                         style={{
                           marginTop: "8px",
                           padding: "8px",
-                          backgroundColor: "rgba(255, 193, 7, 0.1)",
-                          border: "1px solid rgba(255, 193, 7, 0.3)",
+                          backgroundColor: tone.chip,
+                          border: `1px solid ${tone.border}`,
                           borderRadius: "4px",
                         }}
                       >
@@ -2283,10 +2303,10 @@ export default function App() {
                                 padding: "3px 6px",
                                 backgroundColor:
                                   duration === m.seconds
-                                    ? "rgba(255, 193, 7, 1)"
-                                    : "rgba(255, 193, 7, 0.6)",
-                                color: "#000",
-                                border: "none",
+                                    ? tone.border
+                                    : tone.chip,
+                                color: tone.text,
+                                border: `1px solid ${tone.border}`,
                                 borderRadius: "3px",
                                 cursor: "pointer",
                                 fontSize: "9px",
@@ -2348,7 +2368,7 @@ export default function App() {
                             }}
                             style={{
                               padding: "2px 6px",
-                              backgroundColor: "rgba(40, 167, 69, 0.8)",
+                              backgroundColor: tone.border,
                               color: "#fff",
                               border: "none",
                               borderRadius: "3px",

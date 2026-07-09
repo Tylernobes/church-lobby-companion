@@ -33,10 +33,30 @@ const CLUI_DEV_URLS = [
 ];
 const OVERLAY_EXPANDED_WIDTH = 360;
 const OVERLAY_EXPANDED_HEIGHT = 720;
-const OVERLAY_COLLAPSED_SIZE = 68;
+const OVERLAY_COLLAPSED_WIDTH = 220;
+const OVERLAY_COLLAPSED_HEIGHT = 68;
 const OVERLAY_MARGIN = 12;
 let overlayExpanded = false;
 let updateOverlayBounds = null;
+
+function isMidiPanelShortcut(input) {
+  const key = typeof input?.key === "string" ? input.key.toLowerCase() : "";
+  return input?.type === "keyDown" && (input?.meta || input?.control) && key === "m";
+}
+
+function toggleMidiPanelFromShortcut() {
+  const nextExpanded = !overlayExpanded;
+  overlayExpanded = nextExpanded;
+  if (typeof updateOverlayBounds === "function") {
+    updateOverlayBounds();
+  }
+  if (overlayView?.webContents) {
+    overlayView.webContents.send("clui:message", {
+      type: "overlay:toggle-midi-panel",
+      expanded: nextExpanded,
+    });
+  }
+}
 
 async function initStore() {
   if (!kv) {
@@ -289,10 +309,10 @@ function attachOverlayView(parentWindow) {
     const [width, height] = parentWindow.getContentSize();
     const targetWidth = overlayExpanded
       ? OVERLAY_EXPANDED_WIDTH
-      : OVERLAY_COLLAPSED_SIZE;
+      : OVERLAY_COLLAPSED_WIDTH;
     const targetHeight = overlayExpanded
       ? OVERLAY_EXPANDED_HEIGHT
-      : OVERLAY_COLLAPSED_SIZE;
+      : OVERLAY_COLLAPSED_HEIGHT;
     const viewWidth = Math.min(targetWidth, width);
     const viewHeight = Math.min(targetHeight, height);
     overlayView.setBounds({
@@ -337,6 +357,15 @@ function createWindow() {
   }
 
   attachOverlayView(mainWindow);
+
+  const handleMidiShortcut = (event, input) => {
+    if (!isMidiPanelShortcut(input)) return;
+    event.preventDefault();
+    toggleMidiPanelFromShortcut();
+  };
+
+  mainWindow.webContents.on("before-input-event", handleMidiShortcut);
+  overlayView?.webContents?.on("before-input-event", handleMidiShortcut);
 }
 
 let input = null;
