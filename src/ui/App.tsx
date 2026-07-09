@@ -21,12 +21,30 @@ interface Mapping {
   type: "note" | "cc";
   channel: number;
   number: number;
-  action: "fadeIn" | "fadeOut" | "stop" | "selectAndFadeIn";
+  action:
+    | "fadeIn"
+    | "fadeOut"
+    | "stop"
+    | "prev"
+    | "playPause"
+    | "next"
+    | "selectAndFadeIn"
+    | "launchPlaylist"
+    | "launchAlbum";
   label?: string;
   seconds?: number;
   songId?: string;
   songTitle?: string;
+  playlistTitle?: string;
+  playlistId?: string;
+  albumId?: string;
+  albumTitle?: string;
+  queueSongIds?: string[];
   source?: "virtual" | "hardware"; // optional for backward compatibility
+  sourceType?: "virtual" | "hardware" | "unknown";
+  sourceId?: string;
+  sourceName?: string;
+  sourceLocked?: boolean;
 }
 
 interface MidiDevice {
@@ -35,87 +53,100 @@ interface MidiDevice {
 }
 
 export default function App() {
-  // Determine and track which CLUI URL to load in the iframe (dev/prod with fallback)
-  const [iframeSrc, setIframeSrc] = useState<string>("about:blank");
-
-  // Helper: probe a URL quickly to see if it's reachable
-  const probeUrl = async (url: string, timeoutMs = 1500): Promise<boolean> => {
-    try {
-      // Use fetch no-cors; network errors will reject, reachable hosts will resolve
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), timeoutMs);
-      await fetch(url, {
-        mode: "no-cors",
-        cache: "no-store",
-        signal: ctrl.signal as any,
-      });
-      clearTimeout(t);
-      return true;
-    } catch {
-      return false;
+  const SONG_PICKER_DRAFT_STORAGE_KEY = "cl_song_picker_draft_v1";
+  const getActionLabel = (action: Mapping["action"]) => {
+    switch (action) {
+      case "fadeIn":
+        return "Fade In";
+      case "fadeOut":
+        return "Fade Out";
+      case "prev":
+        return "Previous";
+      case "playPause":
+        return "Play/Pause";
+      case "next":
+        return "Next";
+      case "launchPlaylist":
+        return "Launch Playlist";
+      case "selectAndFadeIn":
+        return "Launch Song";
+      case "launchAlbum":
+        return "Launch Album";
+      default:
+        return "Stop";
     }
   };
-
-  // Decide which URL to use for the embedded CLUI app
-  useEffect(() => {
-    const decide = async () => {
-      const prod = "https://clui.expo.app";
-
-      // Allow manual override stored locally (handy for custom tunnels)
-      const manual = localStorage.getItem("clui_iframe_url");
-      if (manual && (await probeUrl(manual))) {
-        setIframeSrc(manual);
-        return;
-      }
-
-      // When running the Electron renderer via Vite dev server (protocol !== file:),
-      // prefer local Expo web dev servers. Fallback to production if offline.
-      if (window.location.protocol !== "file:") {
-        const candidates = [
-          "http://localhost:19006/",
-          "http://127.0.0.1:19006/",
-          "http://localhost:8081/",
-          "http://127.0.0.1:8081/",
-        ];
-
-        for (const base of candidates) {
-          if (await probeUrl(base)) {
-            setIframeSrc(base.replace(/\/$/, ""));
-            return;
-          }
-        }
-
-        // Last-resort dev URL (was previously hardcoded exp.direct). Skip if offline.
-        const previousTunnel = "https://wc19uzo-anonymous-8081.exp.direct";
-        if (await probeUrl(previousTunnel)) {
-          setIframeSrc(previousTunnel);
-          return;
-        }
-
-        // Fall back to production
-        setIframeSrc(prod);
-        return;
-      }
-
-      // Packaged app (file:): always use production
-      setIframeSrc(prod);
+  const getActionTone = (action: Mapping["action"]) => {
+    switch (action) {
+      case "fadeIn":
+        return { border: "rgba(40, 167, 69, 0.5)", chip: "rgba(40, 167, 69, 0.22)", text: "#7ee09a" };
+      case "fadeOut":
+        return { border: "rgba(255, 193, 7, 0.55)", chip: "rgba(255, 193, 7, 0.2)", text: "#ffd04e" };
+      case "stop":
+        return { border: "rgba(220, 53, 69, 0.55)", chip: "rgba(220, 53, 69, 0.2)", text: "#ff7f8f" };
+      case "playPause":
+        return { border: "rgba(40, 167, 69, 0.45)", chip: "rgba(40, 167, 69, 0.18)", text: "#76d992" };
+      case "launchPlaylist":
+        return { border: "rgba(138, 43, 226, 0.6)", chip: "rgba(138, 43, 226, 0.2)", text: "#c89aff" };
+      case "selectAndFadeIn":
+        return { border: "rgba(255, 143, 61, 0.6)", chip: "rgba(255, 143, 61, 0.2)", text: "#ffb37a" };
+      case "launchAlbum":
+        return { border: "rgba(33, 150, 243, 0.6)", chip: "rgba(33, 150, 243, 0.2)", text: "#7cc7ff" };
+      default:
+        return { border: "rgba(23, 162, 184, 0.45)", chip: "rgba(23, 162, 184, 0.18)", text: "#77d8e8" };
+    }
+  };
+  const getQuickActionButtonStyle = (
+    action: Mapping["action"],
+    disabled: boolean
+  ) => {
+    const tone = getActionTone(action);
+    return {
+      padding: "12px 14px",
+      minHeight: "42px",
+      backgroundColor: disabled ? "rgba(255, 255, 255, 0.1)" : tone.chip,
+      color: disabled ? "rgba(255, 255, 255, 0.5)" : tone.text,
+      border: disabled
+        ? "1px solid rgba(255, 255, 255, 0.1)"
+        : `1px solid ${tone.border}`,
+      borderRadius: "10px",
+      cursor: disabled ? "not-allowed" : "pointer",
+      fontSize: "13px",
+      fontWeight: "600",
+      lineHeight: 1.2,
+      letterSpacing: "0.01em",
+      textAlign: "center" as const,
+      opacity: disabled ? 0.5 : 1,
+      transition: "all 0.2s ease",
     };
+  };
+  const formatMappingSource = (mapping: Mapping) => {
+    if (mapping.sourceLocked) {
+      if (mapping.sourceName) return `Source: ${mapping.sourceName}`;
+      if (mapping.sourceType === "virtual") return "Source: Virtual Port";
+      if (mapping.sourceType === "hardware") return "Source: Hardware Device";
+      return "Source: Locked Device";
+    }
+    return "Source: Any Device (legacy-safe)";
+  };
 
-    decide();
-  }, []);
   // Add global styles to prevent scrolling and margins
   React.useEffect(() => {
     document.body.style.margin = "0";
     document.body.style.padding = "0";
     document.body.style.overflow = "hidden";
+    document.body.style.background = "transparent";
     document.documentElement.style.margin = "0";
     document.documentElement.style.padding = "0";
     document.documentElement.style.overflow = "hidden";
+    document.documentElement.style.background = "transparent";
 
     return () => {
       // Cleanup on unmount
       document.body.style.overflow = "";
       document.documentElement.style.overflow = "";
+      document.body.style.background = "";
+      document.documentElement.style.background = "";
     };
   }, []);
 
@@ -127,6 +158,11 @@ export default function App() {
     duration?: number;
     songId?: string;
     songTitle?: string;
+    playlistTitle?: string;
+    albumTitle?: string;
+    playlistId?: string;
+    albumId?: string;
+    queueSongIds?: string[];
   } | null>(null);
   const [devices, setDevices] = useState<MidiDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>("");
@@ -146,8 +182,64 @@ export default function App() {
     id: string;
     title: string;
     artist?: string;
+    playlistId?: string;
+    albumId?: string;
+    queueSongIds?: string[];
   } | null>(null);
   const [waitingForSongSelection, setWaitingForSongSelection] = useState(false);
+  const [showPlaylistPicker, setShowPlaylistPicker] = useState<{
+    action: string;
+    duration?: number;
+  } | null>(null);
+  const [selectedPlaylist, setSelectedPlaylist] = useState<{
+    id: string;
+    title: string;
+    queueSongIds?: string[];
+  } | null>(null);
+  const [waitingForPlaylistSelection, setWaitingForPlaylistSelection] =
+    useState(false);
+  const [showAlbumPicker, setShowAlbumPicker] = useState<{
+    action: string;
+    duration?: number;
+  } | null>(null);
+  const [selectedAlbum, setSelectedAlbum] = useState<{
+    id: string;
+    title: string;
+    queueSongIds?: string[];
+  } | null>(null);
+  const [waitingForAlbumSelection, setWaitingForAlbumSelection] =
+    useState(false);
+  const actionOrder: Mapping["action"][] = [
+    "launchPlaylist",
+    "launchAlbum",
+    "selectAndFadeIn",
+    "fadeIn",
+    "fadeOut",
+    "playPause",
+    "next",
+    "prev",
+    "stop",
+  ];
+  const sortedMappings = React.useMemo(() => {
+    return [...mappings].sort((a, b) => {
+      const actionSort =
+        actionOrder.indexOf(a.action) - actionOrder.indexOf(b.action);
+      if (actionSort !== 0) return actionSort;
+      const channelSort = a.channel - b.channel;
+      if (channelSort !== 0) return channelSort;
+      return a.number - b.number;
+    });
+  }, [mappings]);
+  const mappingSummary = React.useMemo(() => {
+    const counts = new Map<Mapping["action"], number>();
+    mappings.forEach((m) => {
+      counts.set(m.action, (counts.get(m.action) || 0) + 1);
+    });
+    return actionOrder
+      .map((action) => ({ action, count: counts.get(action) || 0 }))
+      .filter((entry) => entry.count > 0);
+  }, [mappings]);
+  const songPickerDraftHydratedRef = React.useRef(false);
 
   // Subscription status from iframe
   const [subscriptionStatus, setSubscriptionStatus] = useState<{
@@ -158,6 +250,183 @@ export default function App() {
     plan: string | null;
   } | null>(null);
   const [subscriptionChecked, setSubscriptionChecked] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SONG_PICKER_DRAFT_STORAGE_KEY);
+      if (!raw) return;
+
+      const draft = JSON.parse(raw) as {
+        showSongPicker?: { action?: string; duration?: number } | null;
+        selectedSong?: {
+          id: string;
+          title: string;
+          artist?: string;
+          playlistId?: string;
+          albumId?: string;
+          queueSongIds?: string[];
+        } | null;
+        waitingForSongSelection?: boolean;
+        showPlaylistPicker?: { action?: string; duration?: number } | null;
+        selectedPlaylist?: {
+          id: string;
+          title: string;
+          queueSongIds?: string[];
+        } | null;
+        waitingForPlaylistSelection?: boolean;
+        showAlbumPicker?: { action?: string; duration?: number } | null;
+        selectedAlbum?: {
+          id: string;
+          title: string;
+          queueSongIds?: string[];
+        } | null;
+        waitingForAlbumSelection?: boolean;
+      };
+
+      if (draft?.showSongPicker?.action === "selectAndFadeIn") {
+        setShowSongPicker({
+          action: "selectAndFadeIn",
+          duration:
+            typeof draft.showSongPicker.duration === "number"
+              ? draft.showSongPicker.duration
+              : undefined,
+        });
+      }
+
+      if (draft?.selectedSong?.id && draft?.selectedSong?.title) {
+        setSelectedSong({
+          id: draft.selectedSong.id,
+          title: draft.selectedSong.title,
+          artist: draft.selectedSong.artist,
+          playlistId: draft.selectedSong.playlistId,
+          albumId: draft.selectedSong.albumId,
+          queueSongIds: Array.isArray(draft.selectedSong.queueSongIds)
+            ? draft.selectedSong.queueSongIds
+            : undefined,
+        });
+      }
+
+      if (draft?.waitingForSongSelection) {
+        setWaitingForSongSelection(true);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "START_SONG_SELECTION_MODE",
+        });
+      }
+
+      if (draft?.showPlaylistPicker?.action === "launchPlaylist") {
+        setShowPlaylistPicker({
+          action: "launchPlaylist",
+          duration:
+            typeof draft.showPlaylistPicker.duration === "number"
+              ? draft.showPlaylistPicker.duration
+              : undefined,
+        });
+      }
+
+      if (draft?.selectedPlaylist?.id && draft?.selectedPlaylist?.title) {
+        setSelectedPlaylist({
+          id: draft.selectedPlaylist.id,
+          title: draft.selectedPlaylist.title,
+          queueSongIds: Array.isArray(draft.selectedPlaylist.queueSongIds)
+            ? draft.selectedPlaylist.queueSongIds
+            : undefined,
+        });
+      }
+
+      if (draft?.waitingForPlaylistSelection) {
+        setWaitingForPlaylistSelection(true);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "START_PLAYLIST_SELECTION_MODE",
+        });
+      }
+
+      if (draft?.showAlbumPicker?.action === "launchAlbum") {
+        setShowAlbumPicker({
+          action: "launchAlbum",
+          duration:
+            typeof draft.showAlbumPicker.duration === "number"
+              ? draft.showAlbumPicker.duration
+              : undefined,
+        });
+      }
+
+      if (draft?.selectedAlbum?.id && draft?.selectedAlbum?.title) {
+        setSelectedAlbum({
+          id: draft.selectedAlbum.id,
+          title: draft.selectedAlbum.title,
+          queueSongIds: Array.isArray(draft.selectedAlbum.queueSongIds)
+            ? draft.selectedAlbum.queueSongIds
+            : undefined,
+        });
+      }
+
+      if (draft?.waitingForAlbumSelection) {
+        setWaitingForAlbumSelection(true);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "START_ALBUM_SELECTION_MODE",
+        });
+      }
+    } catch {}
+    finally {
+      songPickerDraftHydratedRef.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!songPickerDraftHydratedRef.current) return;
+
+    try {
+      if (!showSongPicker) {
+        window.localStorage.removeItem(SONG_PICKER_DRAFT_STORAGE_KEY);
+        return;
+      }
+
+      window.localStorage.setItem(
+        SONG_PICKER_DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          showSongPicker,
+          selectedSong,
+          waitingForSongSelection,
+          showPlaylistPicker,
+          selectedPlaylist,
+          waitingForPlaylistSelection,
+          showAlbumPicker,
+          selectedAlbum,
+          waitingForAlbumSelection,
+        })
+      );
+    } catch {}
+  }, [
+    showSongPicker,
+    selectedSong,
+    waitingForSongSelection,
+    showPlaylistPicker,
+    selectedPlaylist,
+    waitingForPlaylistSelection,
+    showAlbumPicker,
+    selectedAlbum,
+    waitingForAlbumSelection,
+  ]);
+
+  useEffect(() => {
+    window.electron
+      ?.invoke?.("overlay:set-expanded", showMidiPanel)
+      .catch((err) => {
+        console.warn("Failed to sync overlay bounds:", err);
+      });
+  }, [showMidiPanel]);
+
+  const toggleMidiPanel = () => {
+    setShowMidiPanel((prev) => {
+      const next = !prev;
+      window.electron
+        ?.invoke?.("overlay:set-expanded", next)
+        .catch((err) => {
+          console.warn("Failed to sync overlay bounds:", err);
+        });
+      return next;
+    });
+  };
 
   const loadMidiDevices = async () => {
     try {
@@ -196,10 +465,9 @@ export default function App() {
 
     // Request subscription status from iframe
     const requestSubscriptionStatus = () => {
-      const iframe = document.getElementById("website-iframe") as HTMLIFrameElement;
-      if (iframe?.contentWindow) {
-        iframe.contentWindow.postMessage({ type: "get-subscription-status" }, "*");
-      }
+      window.electron?.invoke?.("clui:postMessage", {
+        type: "get-subscription-status",
+      });
     };
 
     // Initial request after short delay to ensure iframe is loaded
@@ -223,6 +491,11 @@ export default function App() {
 
       if (event.data?.type === "midi:learning-result" && learningMode) {
         const result = event.data.payload;
+        const resolvedSourceType =
+          (result.sourceType as "virtual" | "hardware" | "unknown") ||
+          "unknown";
+        const resolvedSourceId =
+          typeof result.sourceId === "string" ? result.sourceId : undefined;
         const calculatedSeconds =
           learningMode.duration ||
           (learningMode.action.includes("fade") ? 10 : undefined);
@@ -240,11 +513,26 @@ export default function App() {
           seconds: calculatedSeconds,
           songId: learningMode.songId,
           songTitle: learningMode.songTitle,
+          playlistTitle: learningMode.playlistTitle,
+          albumTitle: learningMode.albumTitle,
+          playlistId: learningMode.playlistId,
+          albumId: learningMode.albumId,
+          queueSongIds: learningMode.queueSongIds,
           // Tag mapping source; default to virtual if unspecified for safety
           source:
-            result.source === "hardware"
+            result.sourceType === "hardware" || result.source === "hardware"
               ? "hardware"
-              : (result.source as "virtual" | undefined) || "virtual",
+              : "virtual",
+          sourceType: resolvedSourceType,
+          sourceId: resolvedSourceId,
+          sourceName:
+            typeof result.sourceName === "string"
+              ? result.sourceName
+              : undefined,
+          sourceLocked:
+            !!resolvedSourceId ||
+            resolvedSourceType === "virtual" ||
+            resolvedSourceType === "hardware",
         };
 
         console.log(`🔥 Created mapping:`, newMapping);
@@ -265,6 +553,8 @@ export default function App() {
         setStatus(
           `✅ Mapped Ch${result.channel} ${what} → ${learningMode.action}${
             calculatedSeconds ? ` (${calculatedSeconds}s)` : ""
+          }${
+            result.sourceName ? ` [${result.sourceName}]` : ""
           }`
         );
         learningMode.resolve(newMapping);
@@ -273,11 +563,37 @@ export default function App() {
         // Clear selected song and waiting state after successful mapping
         setSelectedSong(null);
         setWaitingForSongSelection(false);
+        setSelectedPlaylist(null);
+        setWaitingForPlaylistSelection(false);
+        setSelectedAlbum(null);
+        setWaitingForAlbumSelection(false);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "STOP_SONG_SELECTION_MODE",
+        });
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "STOP_PLAYLIST_SELECTION_MODE",
+        });
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "STOP_ALBUM_SELECTION_MODE",
+        });
       }
 
       // Handle song selection from CLUI
       if (event.data?.type === "SONG_SELECTED" && waitingForSongSelection) {
-        const { songId, songTitle, songArtist } = event.data;
+        const {
+          songId,
+          songTitle,
+          songArtist,
+          playlistId,
+          albumId,
+          contextType,
+          contextId,
+          queueSongIds,
+        } = event.data;
+        const selectedPlaylistId =
+          playlistId || (contextType === "playlist" ? contextId : undefined);
+        const selectedAlbumId =
+          albumId || (contextType === "album" ? contextId : undefined);
         console.log(
           `🎵 Received song selection from CLUI: ${songTitle} by ${
             songArtist || "Unknown"
@@ -288,8 +604,47 @@ export default function App() {
           id: songId,
           title: songTitle,
           artist: songArtist,
+          playlistId: selectedPlaylistId,
+          albumId: selectedAlbumId,
+          queueSongIds: Array.isArray(queueSongIds) ? queueSongIds : undefined,
         });
         setWaitingForSongSelection(false);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "STOP_SONG_SELECTION_MODE",
+        });
+      }
+
+      if (
+        event.data?.type === "PLAYLIST_SELECTED" &&
+        waitingForPlaylistSelection
+      ) {
+        const { playlistId, playlistTitle, queueSongIds } = event.data;
+        setSelectedPlaylist({
+          id: playlistId,
+          title: playlistTitle || "Playlist",
+          queueSongIds: Array.isArray(queueSongIds)
+            ? (queueSongIds as string[])
+            : undefined,
+        });
+        setWaitingForPlaylistSelection(false);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "STOP_PLAYLIST_SELECTION_MODE",
+        });
+      }
+
+      if (event.data?.type === "ALBUM_SELECTED" && waitingForAlbumSelection) {
+        const { albumId, albumTitle, queueSongIds } = event.data;
+        setSelectedAlbum({
+          id: albumId,
+          title: albumTitle || "Album",
+          queueSongIds: Array.isArray(queueSongIds)
+            ? (queueSongIds as string[])
+            : undefined,
+        });
+        setWaitingForAlbumSelection(false);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "STOP_ALBUM_SELECTION_MODE",
+        });
       }
     };
 
@@ -302,7 +657,12 @@ export default function App() {
       window.removeEventListener("message", handlePostMessage);
       window.electron?.removeAllListeners?.("midi:message");
     };
-  }, [learningMode, waitingForSongSelection]);
+  }, [
+    learningMode,
+    waitingForSongSelection,
+    waitingForPlaylistSelection,
+    waitingForAlbumSelection,
+  ]);
 
   // Load saved mappings on startup
   useEffect(() => {
@@ -313,10 +673,26 @@ export default function App() {
     action: string,
     duration?: number,
     songId?: string,
-    songTitle?: string
+    songTitle?: string,
+    playlistTitle?: string,
+    albumTitle?: string,
+    playlistId?: string,
+    albumId?: string,
+    queueSongIds?: string[]
   ): Promise<any> => {
     return new Promise((resolve) => {
-      setLearningMode({ action, resolve, duration, songId, songTitle });
+      setLearningMode({
+        action,
+        resolve,
+        duration,
+        songId,
+        songTitle,
+        playlistTitle,
+        albumTitle,
+        playlistId,
+        albumId,
+        queueSongIds,
+      });
       setStatus(
         `🎓 Send a MIDI message to map to: ${action}${
           duration ? ` (${duration}s)` : ""
@@ -341,20 +717,27 @@ export default function App() {
         setWaitingForSongSelection(true);
 
         // Send message to CLUI to start listening for song clicks
-        const iframe = document.querySelector("iframe") as HTMLIFrameElement;
-        if (iframe && iframe.contentWindow) {
-          const targetOrigin = (() => {
-            try {
-              return new URL(iframeSrc).origin;
-            } catch {
-              return "*";
-            }
-          })();
-          iframe.contentWindow.postMessage(
-            { type: "START_SONG_SELECTION_MODE" },
-            targetOrigin
-          );
-        }
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "START_SONG_SELECTION_MODE",
+        });
+        return;
+      }
+      if (action === "launchPlaylist") {
+        setShowPlaylistPicker({ action, duration: duration || 10 });
+        setSelectedPlaylist(null);
+        setWaitingForPlaylistSelection(true);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "START_PLAYLIST_SELECTION_MODE",
+        });
+        return;
+      }
+      if (action === "launchAlbum") {
+        setShowAlbumPicker({ action, duration: duration || 10 });
+        setSelectedAlbum(null);
+        setWaitingForAlbumSelection(true);
+        window.electron?.invoke?.("clui:postMessage", {
+          type: "START_ALBUM_SELECTION_MODE",
+        });
         return;
       }
       if (
@@ -383,7 +766,10 @@ export default function App() {
   const startSongMapping = async (
     songId: string,
     songTitle: string,
-    duration: number
+    duration: number,
+    playlistId?: string,
+    albumId?: string,
+    queueSongIds?: string[]
   ) => {
     setShowSongPicker(null);
 
@@ -393,10 +779,86 @@ export default function App() {
     );
 
     try {
-      await startLearning("selectAndFadeIn", duration, songId, songTitle);
+      await startLearning(
+        "selectAndFadeIn",
+        duration,
+        songId,
+        songTitle,
+        undefined,
+        undefined,
+        playlistId,
+        albumId,
+        queueSongIds
+      );
     } catch (error) {
       setStatus("❌ Learning failed");
       setSelectedSong(null);
+    }
+  };
+
+  const startPlaylistMapping = async (
+    playlistId: string,
+    playlistTitle: string,
+    duration: number,
+    queueSongIds?: string[]
+  ) => {
+    setShowPlaylistPicker(null);
+
+    setStatus(
+      `🎵 Selected playlist "${playlistTitle}" - Now press a MIDI key to map it (${duration}s fade)`
+    );
+
+    try {
+      const startSongId = Array.isArray(queueSongIds)
+        ? queueSongIds[0]
+        : undefined;
+      await startLearning(
+        "launchPlaylist",
+        duration,
+        startSongId,
+        undefined,
+        playlistTitle,
+        undefined,
+        playlistId,
+        undefined,
+        queueSongIds
+      );
+    } catch (error) {
+      setStatus("❌ Learning failed");
+      setSelectedPlaylist(null);
+    }
+  };
+
+  const startAlbumMapping = async (
+    albumId: string,
+    albumTitle: string,
+    duration: number,
+    queueSongIds?: string[]
+  ) => {
+    setShowAlbumPicker(null);
+
+    setStatus(
+      `🎵 Selected album "${albumTitle}" - Now press a MIDI key to map it (${duration}s fade)`
+    );
+
+    try {
+      const startSongId = Array.isArray(queueSongIds)
+        ? queueSongIds[0]
+        : undefined;
+      await startLearning(
+        "launchAlbum",
+        duration,
+        startSongId,
+        undefined,
+        undefined,
+        albumTitle,
+        undefined,
+        albumId,
+        queueSongIds
+      );
+    } catch (error) {
+      setStatus("❌ Learning failed");
+      setSelectedAlbum(null);
     }
   };
 
@@ -458,29 +920,11 @@ export default function App() {
         top: 0,
         left: 0,
         overflow: "hidden",
-        backgroundColor: "#000",
+        backgroundColor: "transparent",
         margin: 0,
         padding: 0,
       }}
     >
-      {/* Church Lobby App (Full Screen) */}
-      <iframe
-        id="website-iframe"
-        src={iframeSrc}
-        style={{
-          width: "100%",
-          height: "100%",
-          border: "0",
-          margin: 0,
-          padding: 0,
-          backgroundColor: "#000",
-          display: "block",
-        }}
-        frameBorder="0"
-        scrolling="no"
-        seamless
-      />
-
       {/* Floating MIDI Control Indicator */}
       <div
         style={{
@@ -492,7 +936,7 @@ export default function App() {
       >
         {/* Hamburger Menu Button */}
         <button
-          onClick={() => setShowMidiPanel(!showMidiPanel)}
+          onClick={toggleMidiPanel}
           style={{
             width: "44px",
             height: "44px",
@@ -547,10 +991,10 @@ export default function App() {
         <div
           style={{
             position: "fixed",
-            top: "80px",
+            top: "56px",
             right: "20px",
-            width: "320px",
-            maxHeight: "calc(100vh - 120px)",
+            width: "min(96vw, 760px)",
+            maxHeight: "calc(100vh - 72px)",
             backgroundColor: "rgba(0, 0, 0, 0.95)",
             backdropFilter: "blur(20px)",
             border: "1px solid rgba(255, 255, 255, 0.1)",
@@ -659,40 +1103,91 @@ export default function App() {
           {/* Panel Content */}
           <div
             style={{
-              padding: "20px",
-              maxHeight: "calc(100vh - 220px)",
+              padding: "18px",
+              maxHeight: "calc(100vh - 150px)",
               overflowY: "auto",
             }}
           >
-            {/* Software MIDI Instructions */}
+            {/* MIDI Device Selection */}
             <div style={{ marginBottom: "20px" }}>
-              <div
+              <label
                 style={{
-                  padding: "12px",
-                  backgroundColor: "rgba(0, 123, 255, 0.1)",
-                  border: "1px solid rgba(0, 123, 255, 0.3)",
-                  borderRadius: "8px",
+                  display: "block",
+                  fontSize: "13px",
+                  fontWeight: "500",
+                  color: "rgba(255, 255, 255, 0.9)",
+                  marginBottom: "8px",
                 }}
               >
-                <div
+                MIDI Input Device
+              </label>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                }}
+              >
+                <select
+                  value={selectedDevice}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const device = devices.find((d) => String(d.id) === id);
+                    if (device) {
+                      connectToDevice(device);
+                    }
+                  }}
                   style={{
+                    flex: 1,
+                    padding: "10px 12px",
+                    backgroundColor: "rgba(255, 255, 255, 0.08)",
+                    border: "1px solid rgba(255, 255, 255, 0.2)",
+                    borderRadius: "8px",
+                    color: "#fff",
                     fontSize: "12px",
-                    color: "#007bff",
-                    fontWeight: "600",
-                    marginBottom: "6px",
                   }}
                 >
-                  💡 Software MIDI Integration
-                </div>
-                <div
+                  <option value="" style={{ backgroundColor: "#1a1a1a" }}>
+                    Select device...
+                  </option>
+                  {devices.map((device) => (
+                    <option
+                      key={String(device.id)}
+                      value={String(device.id)}
+                      style={{ backgroundColor: "#1a1a1a" }}
+                    >
+                      {device.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={loadMidiDevices}
                   style={{
-                    fontSize: "11px",
-                    color: "rgba(255, 255, 255, 0.9)",
-                    lineHeight: "1.4",
+                    padding: "10px 12px",
+                    backgroundColor: "rgba(0, 123, 255, 0.2)",
+                    color: "#66b3ff",
+                    border: "1px solid rgba(0, 123, 255, 0.35)",
+                    borderRadius: "8px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                    fontWeight: "600",
+                    minWidth: "84px",
                   }}
                 >
-                  Configure your software (Ableton, ProPresenter, etc.) to send MIDI to "Church Lobby Companion". Create mappings below, then trigger them from your software.
-                </div>
+                  Refresh
+                </button>
+              </div>
+              <div
+                style={{
+                  marginTop: "8px",
+                  fontSize: "11px",
+                  color: isConnected
+                    ? "#4cd964"
+                    : "rgba(255, 255, 255, 0.6)",
+                }}
+              >
+                {isConnected
+                  ? `Connected: ${currentDevice || "Unknown device"}`
+                  : "Not connected. Select a hardware device or use Virtual Port for software MIDI."}
               </div>
             </div>
 
@@ -712,105 +1207,72 @@ export default function App() {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
+                  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
                   gap: "8px",
                 }}
               >
                 <button
+                  onClick={() => addMapping("prev")}
+                  disabled={!!learningMode}
+                  style={getQuickActionButtonStyle("prev", !!learningMode)}
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => addMapping("playPause")}
+                  disabled={!!learningMode}
+                  style={getQuickActionButtonStyle("playPause", !!learningMode)}
+                >
+                  Play/Pause
+                </button>
+                <button
+                  onClick={() => addMapping("next")}
+                  disabled={!!learningMode}
+                  style={getQuickActionButtonStyle("next", !!learningMode)}
+                >
+                  Next
+                </button>
+                <button
                   onClick={() => addMapping("fadeIn")}
                   disabled={!!learningMode}
-                  style={{
-                    padding: "12px 16px",
-                    backgroundColor: learningMode
-                      ? "rgba(255, 255, 255, 0.1)"
-                      : "rgba(40, 167, 69, 0.2)",
-                    color: learningMode
-                      ? "rgba(255, 255, 255, 0.5)"
-                      : "#28a745",
-                    border: learningMode
-                      ? "1px solid rgba(255, 255, 255, 0.1)"
-                      : "1px solid rgba(40, 167, 69, 0.3)",
-                    borderRadius: "8px",
-                    cursor: learningMode ? "not-allowed" : "pointer",
-                    fontSize: "13px",
-                    fontWeight: "600",
-                    opacity: learningMode ? 0.5 : 1,
-                    transition: "all 0.2s ease",
-                  }}
+                  style={getQuickActionButtonStyle("fadeIn", !!learningMode)}
                 >
                   Fade In
                 </button>
                 <button
                   onClick={() => addMapping("fadeOut")}
                   disabled={!!learningMode}
-                  style={{
-                    padding: "12px 16px",
-                    backgroundColor: learningMode
-                      ? "rgba(255, 255, 255, 0.1)"
-                      : "rgba(255, 193, 7, 0.2)",
-                    color: learningMode
-                      ? "rgba(255, 255, 255, 0.5)"
-                      : "#ffc107",
-                    border: learningMode
-                      ? "1px solid rgba(255, 255, 255, 0.1)"
-                      : "1px solid rgba(255, 193, 7, 0.3)",
-                    borderRadius: "8px",
-                    cursor: learningMode ? "not-allowed" : "pointer",
-                    fontSize: "13px",
-                    fontWeight: "600",
-                    opacity: learningMode ? 0.5 : 1,
-                    transition: "all 0.2s ease",
-                  }}
+                  style={getQuickActionButtonStyle("fadeOut", !!learningMode)}
                 >
                   Fade Out
                 </button>
                 <button
                   onClick={() => addMapping("stop")}
                   disabled={!!learningMode}
-                  style={{
-                    padding: "12px 16px",
-                    backgroundColor: learningMode
-                      ? "rgba(255, 255, 255, 0.1)"
-                      : "rgba(220, 53, 69, 0.2)",
-                    color: learningMode
-                      ? "rgba(255, 255, 255, 0.5)"
-                      : "#dc3545",
-                    border: learningMode
-                      ? "1px solid rgba(255, 255, 255, 0.1)"
-                      : "1px solid rgba(220, 53, 69, 0.3)",
-                    borderRadius: "8px",
-                    cursor: learningMode ? "not-allowed" : "pointer",
-                    fontSize: "13px",
-                    fontWeight: "600",
-                    opacity: learningMode ? 0.5 : 1,
-                    transition: "all 0.2s ease",
-                  }}
+                  style={getQuickActionButtonStyle("stop", !!learningMode)}
                 >
                   Stop
                 </button>
                 <button
                   onClick={() => addMapping("selectAndFadeIn")}
                   disabled={!!learningMode}
-                  style={{
-                    padding: "12px 16px",
-                    backgroundColor: learningMode
-                      ? "rgba(255, 255, 255, 0.1)"
-                      : "rgba(138, 43, 226, 0.2)",
-                    color: learningMode
-                      ? "rgba(255, 255, 255, 0.5)"
-                      : "#8a2be2",
-                    border: learningMode
-                      ? "1px solid rgba(255, 255, 255, 0.1)"
-                      : "1px solid rgba(138, 43, 226, 0.3)",
-                    borderRadius: "8px",
-                    cursor: learningMode ? "not-allowed" : "pointer",
-                    fontSize: "13px",
-                    fontWeight: "600",
-                    opacity: learningMode ? 0.5 : 1,
-                    transition: "all 0.2s ease",
-                  }}
+                  style={getQuickActionButtonStyle("selectAndFadeIn", !!learningMode)}
                 >
-                  Select Song & Fade In
+                  Launch Song
+                </button>
+                <button
+                  onClick={() => addMapping("launchPlaylist")}
+                  disabled={!!learningMode}
+                  style={getQuickActionButtonStyle("launchPlaylist", !!learningMode)}
+                >
+                  Launch Playlist
+                </button>
+                <button
+                  onClick={() => addMapping("launchAlbum")}
+                  disabled={!!learningMode}
+                  style={getQuickActionButtonStyle("launchAlbum", !!learningMode)}
+                >
+                  Launch Album
                 </button>
               </div>
             </div>
@@ -820,27 +1282,32 @@ export default function App() {
               <div
                 style={{
                   marginBottom: "20px",
-                  padding: "12px",
+                  padding: "16px",
                   backgroundColor: "rgba(255, 193, 7, 0.1)",
                   border: "1px solid rgba(255, 193, 7, 0.3)",
-                  borderRadius: "8px",
+                  borderRadius: "12px",
+                  backdropFilter: "blur(10px)",
                 }}
               >
                 <div
                   style={{
-                    fontSize: "12px",
+                    fontSize: "14px",
                     fontWeight: "600",
                     color: "#ffc107",
                     marginBottom: "8px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
                   }}
                 >
                   ⏱️ Set Fade Duration
                 </div>
                 <div
                   style={{
-                    fontSize: "11px",
+                    fontSize: "12px",
                     color: "rgba(255, 255, 255, 0.8)",
-                    marginBottom: "12px",
+                    marginBottom: "10px",
+                    fontWeight: "500",
                   }}
                 >
                   How long should the{" "}
@@ -853,8 +1320,8 @@ export default function App() {
                   style={{
                     display: "grid",
                     gridTemplateColumns: "repeat(4, 1fr)",
-                    gap: "6px",
-                    marginBottom: "8px",
+                    gap: "8px",
+                    marginBottom: "10px",
                   }}
                 >
                   {[3, 5, 10, 15].map((duration) => (
@@ -867,14 +1334,14 @@ export default function App() {
                         )
                       }
                       style={{
-                        padding: "6px 8px",
+                        padding: "10px",
                         backgroundColor: "rgba(255, 193, 7, 0.8)",
                         color: "#000",
                         border: "none",
-                        borderRadius: "4px",
+                        borderRadius: "6px",
                         cursor: "pointer",
-                        fontSize: "11px",
-                        fontWeight: "500",
+                        fontSize: "12px",
+                        fontWeight: "600",
                       }}
                     >
                       {duration}s
@@ -883,9 +1350,9 @@ export default function App() {
                 </div>
                 <div
                   style={{
-                    marginBottom: "8px",
+                    marginBottom: "10px",
                     display: "flex",
-                    gap: "6px",
+                    gap: "8px",
                     alignItems: "center",
                   }}
                 >
@@ -899,12 +1366,12 @@ export default function App() {
                     placeholder="Custom (e.g. 8.5)"
                     style={{
                       flex: 1,
-                      padding: "4px 6px",
+                      padding: "8px 10px",
                       backgroundColor: "rgba(255, 255, 255, 0.1)",
                       border: "1px solid rgba(255, 255, 255, 0.3)",
-                      borderRadius: "4px",
+                      borderRadius: "6px",
                       color: "#fff",
-                      fontSize: "11px",
+                      fontSize: "12px",
                     }}
                   />
                   <button
@@ -924,7 +1391,7 @@ export default function App() {
                       parseFloat(customDuration) > 60
                     }
                     style={{
-                      padding: "4px 8px",
+                      padding: "8px 12px",
                       backgroundColor:
                         !customDuration ||
                         parseFloat(customDuration) < 0.5 ||
@@ -933,7 +1400,7 @@ export default function App() {
                           : "rgba(40, 167, 69, 0.8)",
                       color: "#fff",
                       border: "none",
-                      borderRadius: "4px",
+                      borderRadius: "6px",
                       cursor:
                         !customDuration ||
                         parseFloat(customDuration) < 0.5 ||
@@ -947,6 +1414,7 @@ export default function App() {
                         parseFloat(customDuration) > 60
                           ? 0.5
                           : 1,
+                      fontWeight: "600",
                     }}
                   >
                     Use
@@ -955,13 +1423,13 @@ export default function App() {
                 <button
                   onClick={() => setShowDurationPicker(null)}
                   style={{
-                    padding: "4px 8px",
+                    padding: "8px 16px",
                     backgroundColor: "rgba(255, 255, 255, 0.1)",
                     color: "#fff",
                     border: "1px solid rgba(255, 255, 255, 0.2)",
-                    borderRadius: "4px",
+                    borderRadius: "6px",
                     cursor: "pointer",
-                    fontSize: "11px",
+                    fontSize: "12px",
                   }}
                 >
                   Cancel
@@ -971,14 +1439,13 @@ export default function App() {
 
             {/* ... */}
 
-            {/* Song Picker Modal */}
-            {showSongPicker && (
+            {showPlaylistPicker && (
               <div
                 style={{
                   marginBottom: "20px",
                   padding: "16px",
-                  backgroundColor: "rgba(138, 43, 226, 0.1)",
-                  border: "1px solid rgba(138, 43, 226, 0.3)",
+                  backgroundColor: "rgba(102, 16, 242, 0.12)",
+                  border: "1px solid rgba(102, 16, 242, 0.35)",
                   borderRadius: "12px",
                   backdropFilter: "blur(10px)",
                 }}
@@ -987,7 +1454,368 @@ export default function App() {
                   style={{
                     fontSize: "14px",
                     fontWeight: "600",
-                    color: "#8a2be2",
+                    color: "#b089ff",
+                    marginBottom: "8px",
+                  }}
+                >
+                  📻 Select Playlist for MIDI Mapping
+                </div>
+
+                {waitingForPlaylistSelection && !selectedPlaylist && (
+                  <div
+                    style={{
+                      marginBottom: "16px",
+                      padding: "16px",
+                      backgroundColor: "rgba(0, 123, 255, 0.1)",
+                      border: "1px solid rgba(0, 123, 255, 0.3)",
+                      borderRadius: "8px",
+                      textAlign: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        color: "#66b3ff",
+                        marginBottom: "8px",
+                        fontWeight: "600",
+                      }}
+                    >
+                      🎯 Waiting for Playlist Selection
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "rgba(255, 255, 255, 0.8)",
+                      }}
+                    >
+                      Open the playlists tab in CLUI and click the playlist you
+                      want this MIDI trigger to launch.
+                    </div>
+                  </div>
+                )}
+
+                {selectedPlaylist && (
+                  <div
+                    style={{
+                      marginBottom: "16px",
+                      padding: "12px",
+                      backgroundColor: "rgba(0, 255, 0, 0.1)",
+                      border: "1px solid rgba(0, 255, 0, 0.3)",
+                      borderRadius: "8px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        fontWeight: "600",
+                        color: "#00ff7a",
+                        marginBottom: "4px",
+                      }}
+                    >
+                      ✅ Selected Playlist:
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        color: "#fff",
+                        fontWeight: "500",
+                      }}
+                    >
+                      {selectedPlaylist.title}
+                    </div>
+                  </div>
+                )}
+
+                {selectedPlaylist && (
+                  <div style={{ marginBottom: "16px" }}>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "rgba(255, 255, 255, 0.8)",
+                        marginBottom: "10px",
+                        fontWeight: "500",
+                      }}
+                    >
+                      ⏱️ Choose Fade Duration:
+                    </div>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(4, 1fr)",
+                        gap: "8px",
+                      }}
+                    >
+                      {[3, 5, 10, 15].map((duration) => (
+                        <button
+                          key={duration}
+                          onClick={() =>
+                            startPlaylistMapping(
+                              selectedPlaylist.id,
+                              selectedPlaylist.title,
+                              duration,
+                              selectedPlaylist.queueSongIds
+                            )
+                          }
+                          style={{
+                            padding: "10px",
+                            backgroundColor: "rgba(102, 16, 242, 0.8)",
+                            color: "#fff",
+                            border: "none",
+                            borderRadius: "6px",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: "600",
+                            transition: "all 0.2s ease",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(102, 16, 242, 1)";
+                            e.currentTarget.style.transform =
+                              "translateY(-1px)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(102, 16, 242, 0.8)";
+                            e.currentTarget.style.transform = "translateY(0)";
+                          }}
+                        >
+                          {duration}s
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    justifyContent: "center",
+                  }}
+                >
+                  <button
+                    onClick={() => {
+                      setShowPlaylistPicker(null);
+                      setSelectedPlaylist(null);
+                      setWaitingForPlaylistSelection(false);
+                      setStatus("");
+                      window.electron?.invoke?.("clui:postMessage", {
+                        type: "STOP_PLAYLIST_SELECTION_MODE",
+                      });
+                    }}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: "rgba(255, 255, 255, 0.1)",
+                      color: "#fff",
+                      border: "1px solid rgba(255, 255, 255, 0.2)",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {showAlbumPicker && (
+              <div
+                style={{
+                  marginBottom: "20px",
+                  padding: "16px",
+                  backgroundColor: "rgba(33, 150, 243, 0.12)",
+                  border: "1px solid rgba(33, 150, 243, 0.35)",
+                  borderRadius: "12px",
+                  backdropFilter: "blur(10px)",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "14px",
+                    fontWeight: "600",
+                    color: "#7cc7ff",
+                    marginBottom: "8px",
+                  }}
+                >
+                  💿 Select Album for MIDI Mapping
+                </div>
+
+                {waitingForAlbumSelection && !selectedAlbum && (
+                  <div
+                    style={{
+                      marginBottom: "16px",
+                      padding: "16px",
+                      backgroundColor: "rgba(0, 123, 255, 0.1)",
+                      border: "1px solid rgba(0, 123, 255, 0.3)",
+                      borderRadius: "8px",
+                      textAlign: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        color: "#66b3ff",
+                        marginBottom: "8px",
+                        fontWeight: "600",
+                      }}
+                    >
+                      🎯 Waiting for Album Selection
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "rgba(255, 255, 255, 0.8)",
+                      }}
+                    >
+                      Open the albums tab in CLUI and click the album you want
+                      this MIDI trigger to launch.
+                    </div>
+                  </div>
+                )}
+
+                {selectedAlbum && (
+                  <div
+                    style={{
+                      marginBottom: "16px",
+                      padding: "12px",
+                      backgroundColor: "rgba(0, 255, 0, 0.1)",
+                      border: "1px solid rgba(0, 255, 0, 0.3)",
+                      borderRadius: "8px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        fontWeight: "600",
+                        color: "#00ff7a",
+                        marginBottom: "4px",
+                      }}
+                    >
+                      ✅ Selected Album:
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        color: "#fff",
+                        fontWeight: "500",
+                      }}
+                    >
+                      {selectedAlbum.title}
+                    </div>
+                  </div>
+                )}
+
+                {selectedAlbum && (
+                  <div style={{ marginBottom: "16px" }}>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "rgba(255, 255, 255, 0.8)",
+                        marginBottom: "10px",
+                        fontWeight: "500",
+                      }}
+                    >
+                      ⏱️ Choose Fade Duration:
+                    </div>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(4, 1fr)",
+                        gap: "8px",
+                      }}
+                    >
+                      {[3, 5, 10, 15].map((duration) => (
+                        <button
+                          key={duration}
+                          onClick={() =>
+                            startAlbumMapping(
+                              selectedAlbum.id,
+                              selectedAlbum.title,
+                              duration,
+                              selectedAlbum.queueSongIds
+                            )
+                          }
+                          style={{
+                            padding: "10px",
+                            backgroundColor: "rgba(33, 150, 243, 0.8)",
+                            color: "#fff",
+                            border: "none",
+                            borderRadius: "6px",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: "600",
+                            transition: "all 0.2s ease",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(33, 150, 243, 1)";
+                            e.currentTarget.style.transform =
+                              "translateY(-1px)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "rgba(33, 150, 243, 0.8)";
+                            e.currentTarget.style.transform = "translateY(0)";
+                          }}
+                        >
+                          {duration}s
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    justifyContent: "center",
+                  }}
+                >
+                  <button
+                    onClick={() => {
+                      setShowAlbumPicker(null);
+                      setSelectedAlbum(null);
+                      setWaitingForAlbumSelection(false);
+                      setStatus("");
+                      window.electron?.invoke?.("clui:postMessage", {
+                        type: "STOP_ALBUM_SELECTION_MODE",
+                      });
+                    }}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: "rgba(255, 255, 255, 0.1)",
+                      color: "#fff",
+                      border: "1px solid rgba(255, 255, 255, 0.2)",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Song Picker Modal */}
+            {showSongPicker && (
+              <div
+                style={{
+                  marginBottom: "20px",
+                  padding: "16px",
+                  backgroundColor: "rgba(255, 143, 61, 0.1)",
+                  border: "1px solid rgba(255, 143, 61, 0.3)",
+                  borderRadius: "12px",
+                  backdropFilter: "blur(10px)",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "14px",
+                    fontWeight: "600",
+                    color: "#ff9b54",
                     marginBottom: "8px",
                     display: "flex",
                     alignItems: "center",
@@ -1101,12 +1929,15 @@ export default function App() {
                             startSongMapping(
                               selectedSong.id,
                               selectedSong.title,
-                              duration
+                              duration,
+                              selectedSong.playlistId,
+                              selectedSong.albumId,
+                              selectedSong.queueSongIds
                             )
                           }
                           style={{
                             padding: "10px",
-                            backgroundColor: "rgba(138, 43, 226, 0.8)",
+                            backgroundColor: "rgba(255, 143, 61, 0.8)",
                             color: "#fff",
                             border: "none",
                             borderRadius: "6px",
@@ -1117,13 +1948,13 @@ export default function App() {
                           }}
                           onMouseEnter={(e) => {
                             e.currentTarget.style.backgroundColor =
-                              "rgba(138, 43, 226, 1)";
+                              "rgba(255, 143, 61, 1)";
                             e.currentTarget.style.transform =
                               "translateY(-1px)";
                           }}
                           onMouseLeave={(e) => {
                             e.currentTarget.style.backgroundColor =
-                              "rgba(138, 43, 226, 0.8)";
+                              "rgba(255, 143, 61, 0.8)";
                             e.currentTarget.style.transform = "translateY(0)";
                           }}
                         >
@@ -1150,22 +1981,9 @@ export default function App() {
                       setStatus("");
 
                       // Stop listening for song selection in CLUI
-                      const iframe = document.querySelector(
-                        "iframe"
-                      ) as HTMLIFrameElement;
-                      if (iframe && iframe.contentWindow) {
-                        const targetOrigin = (() => {
-                          try {
-                            return new URL(iframeSrc).origin;
-                          } catch {
-                            return "*";
-                          }
-                        })();
-                        iframe.contentWindow.postMessage(
-                          { type: "STOP_SONG_SELECTION_MODE" },
-                          targetOrigin
-                        );
-                      }
+                      window.electron?.invoke?.("clui:postMessage", {
+                        type: "STOP_SONG_SELECTION_MODE",
+                      });
                     }}
                     style={{
                       padding: "8px 16px",
@@ -1243,54 +2061,155 @@ export default function App() {
               >
                 Active Mappings ({mappings.length})
               </label>
+              {mappingSummary.length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "6px",
+                    marginBottom: "10px",
+                  }}
+                >
+                  {mappingSummary.map((entry) => {
+                    const tone = getActionTone(entry.action);
+                    return (
+                      <div
+                        key={entry.action}
+                        style={{
+                          padding: "3px 8px",
+                          borderRadius: "999px",
+                          border: `1px solid ${tone.border}`,
+                          backgroundColor: tone.chip,
+                          color: tone.text,
+                          fontSize: "10px",
+                          fontWeight: "700",
+                        }}
+                      >
+                        {getActionLabel(entry.action)}: {entry.count}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               <div
                 style={{
                   display: "grid",
-                  gap: "8px",
-                  maxHeight: "200px",
-                  overflowY: "auto",
+                  gap: "10px",
                 }}
               >
-                {mappings.map((m) => (
+                {sortedMappings.map((m) => {
+                  const tone = getActionTone(m.action);
+                  return (
                   <div
                     key={m.id}
                     style={{
                       padding: "10px 12px",
-                      backgroundColor: "rgba(255, 255, 255, 0.05)",
-                      border: "1px solid rgba(255, 255, 255, 0.1)",
-                      borderRadius: "6px",
+                      backgroundColor: "rgba(255, 255, 255, 0.04)",
+                      border: "1px solid rgba(255, 255, 255, 0.14)",
+                      borderLeft: `4px solid ${tone.border}`,
+                      borderRadius: "8px",
                     }}
                   >
                     <div
                       style={{
-                        fontSize: "12px",
-                        fontWeight: "600",
-                        color: "#fff",
-                        marginBottom: "4px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "8px",
+                        marginBottom: "5px",
                       }}
                     >
-                      {m.action === "fadeIn"
-                        ? "Fade In"
-                        : m.action === "fadeOut"
-                        ? "Fade Out"
-                        : m.action === "selectAndFadeIn"
-                        ? "Select Song & Fade In"
-                        : "Stop"}
+                      <div
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: "999px",
+                          border: `1px solid ${tone.border}`,
+                          backgroundColor: tone.chip,
+                          color: tone.text,
+                          fontSize: "10px",
+                          fontWeight: "700",
+                        }}
+                      >
+                        {getActionLabel(m.action)}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "10px",
+                          color: "rgba(255, 255, 255, 0.8)",
+                          fontWeight: "600",
+                        }}
+                      >
+                        Ch{m.channel} {m.type === "cc" ? "CC" : "Note"}
+                        {m.number}
+                      </div>
                     </div>
                     <div
                       style={{
                         fontSize: "11px",
                         color: "rgba(255, 255, 255, 0.7)",
                         marginBottom: "6px",
+                        lineHeight: 1.4,
                       }}
                     >
-                      Ch{m.channel} Note{m.number}
-                      {m.seconds && ` • ${m.seconds}s`}
-                      {m.songTitle && ` • ${m.songTitle}`}
+                      {m.action === "launchPlaylist" && (
+                        <>
+                          <div
+                            style={{
+                              color: "rgba(224, 189, 255, 0.98)",
+                              fontWeight: 800,
+                              fontSize: "14px",
+                              lineHeight: 1.25,
+                              marginBottom: "3px",
+                            }}
+                          >
+                            Target Playlist: {m.playlistTitle || "(Untitled playlist)"}
+                          </div>
+                        </>
+                      )}
+                      {m.action === "launchAlbum" && (
+                        <>
+                          <div
+                            style={{
+                              color: "rgba(124, 199, 255, 0.98)",
+                              fontWeight: 800,
+                              fontSize: "14px",
+                              lineHeight: 1.25,
+                              marginBottom: "3px",
+                            }}
+                          >
+                            Target Album: {m.albumTitle || "(Untitled album)"}
+                          </div>
+                        </>
+                      )}
+                      {m.action === "selectAndFadeIn" && m.songTitle && (
+                        <div
+                          style={{
+                            color: "rgba(255, 143, 61, 0.98)",
+                            fontWeight: 800,
+                            fontSize: "14px",
+                            lineHeight: 1.25,
+                            marginBottom: "3px",
+                          }}
+                        >
+                          Target Song: {m.songTitle}
+                        </div>
+                      )}
+                      {m.seconds && <div>{`${m.seconds}s fade`}</div>}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "10px",
+                        color: "rgba(255, 255, 255, 0.55)",
+                        marginBottom: "7px",
+                      }}
+                    >
+                      {formatMappingSource(m)}
                     </div>
                     <div style={{ display: "flex", gap: "4px" }}>
                       {(m.action === "fadeIn" ||
                         m.action === "fadeOut" ||
+                        m.action === "launchPlaylist" ||
+                        m.action === "launchAlbum" ||
                         m.action === "selectAndFadeIn") && (
                         <button
                           onClick={() =>
@@ -1443,7 +2362,7 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                ))}
+                )})}
                 {mappings.length === 0 && (
                   <div
                     style={{

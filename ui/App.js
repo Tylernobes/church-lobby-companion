@@ -37,78 +37,22 @@ exports.default = App;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = __importStar(require("react"));
 function App() {
-    // Determine and track which CLUI URL to load in the iframe (dev/prod with fallback)
-    const [iframeSrc, setIframeSrc] = (0, react_1.useState)("about:blank");
-    // Helper: probe a URL quickly to see if it's reachable
-    const probeUrl = async (url, timeoutMs = 1500) => {
-        try {
-            // Use fetch no-cors; network errors will reject, reachable hosts will resolve
-            const ctrl = new AbortController();
-            const t = setTimeout(() => ctrl.abort(), timeoutMs);
-            await fetch(url, {
-                mode: "no-cors",
-                cache: "no-store",
-                signal: ctrl.signal,
-            });
-            clearTimeout(t);
-            return true;
-        }
-        catch {
-            return false;
-        }
-    };
-    // Decide which URL to use for the embedded CLUI app
-    (0, react_1.useEffect)(() => {
-        const decide = async () => {
-            const prod = "https://clui.expo.app";
-            // Allow manual override stored locally (handy for custom tunnels)
-            const manual = localStorage.getItem("clui_iframe_url");
-            if (manual && (await probeUrl(manual))) {
-                setIframeSrc(manual);
-                return;
-            }
-            // When running the Electron renderer via Vite dev server (protocol !== file:),
-            // prefer local Expo web dev servers. Fallback to production if offline.
-            if (window.location.protocol !== "file:") {
-                const candidates = [
-                    "http://localhost:19006/",
-                    "http://127.0.0.1:19006/",
-                    "http://localhost:8081/",
-                    "http://127.0.0.1:8081/",
-                ];
-                for (const base of candidates) {
-                    if (await probeUrl(base)) {
-                        setIframeSrc(base.replace(/\/$/, ""));
-                        return;
-                    }
-                }
-                // Last-resort dev URL (was previously hardcoded exp.direct). Skip if offline.
-                const previousTunnel = "https://wc19uzo-anonymous-8081.exp.direct";
-                if (await probeUrl(previousTunnel)) {
-                    setIframeSrc(previousTunnel);
-                    return;
-                }
-                // Fall back to production
-                setIframeSrc(prod);
-                return;
-            }
-            // Packaged app (file:): always use production
-            setIframeSrc(prod);
-        };
-        decide();
-    }, []);
     // Add global styles to prevent scrolling and margins
     react_1.default.useEffect(() => {
         document.body.style.margin = "0";
         document.body.style.padding = "0";
         document.body.style.overflow = "hidden";
+        document.body.style.background = "transparent";
         document.documentElement.style.margin = "0";
         document.documentElement.style.padding = "0";
         document.documentElement.style.overflow = "hidden";
+        document.documentElement.style.background = "transparent";
         return () => {
             // Cleanup on unmount
             document.body.style.overflow = "";
             document.documentElement.style.overflow = "";
+            document.body.style.background = "";
+            document.documentElement.style.background = "";
         };
     }, []);
     const [mappings, setMappings] = (0, react_1.useState)([]);
@@ -163,10 +107,9 @@ function App() {
         loadMidiDevices();
         // Request subscription status from iframe
         const requestSubscriptionStatus = () => {
-            const iframe = document.getElementById("website-iframe");
-            if (iframe?.contentWindow) {
-                iframe.contentWindow.postMessage({ type: "get-subscription-status" }, "*");
-            }
+            window.electron?.invoke?.("clui:postMessage", {
+                type: "get-subscription-status",
+            });
         };
         // Initial request after short delay to ensure iframe is loaded
         const initialTimer = setTimeout(requestSubscriptionStatus, 2000);
@@ -269,18 +212,9 @@ function App() {
                 setSelectedSong(null); // Clear any previous selection
                 setWaitingForSongSelection(true);
                 // Send message to CLUI to start listening for song clicks
-                const iframe = document.querySelector("iframe");
-                if (iframe && iframe.contentWindow) {
-                    const targetOrigin = (() => {
-                        try {
-                            return new URL(iframeSrc).origin;
-                        }
-                        catch {
-                            return "*";
-                        }
-                    })();
-                    iframe.contentWindow.postMessage({ type: "START_SONG_SELECTION_MODE" }, targetOrigin);
-                }
+                window.electron?.invoke?.("clui:postMessage", {
+                    type: "START_SONG_SELECTION_MODE",
+                });
                 return;
             }
             if ((action === "fadeIn" || action === "fadeOut") &&
@@ -363,18 +297,10 @@ function App() {
             top: 0,
             left: 0,
             overflow: "hidden",
-            backgroundColor: "#000",
+            backgroundColor: "transparent",
             margin: 0,
             padding: 0,
-        }, children: [(0, jsx_runtime_1.jsx)("iframe", { id: "website-iframe", src: iframeSrc, style: {
-                    width: "100%",
-                    height: "100%",
-                    border: "0",
-                    margin: 0,
-                    padding: 0,
-                    backgroundColor: "#000",
-                    display: "block",
-                }, frameBorder: "0", scrolling: "no", seamless: true }), (0, jsx_runtime_1.jsx)("div", { style: {
+        }, children: [(0, jsx_runtime_1.jsx)("div", { style: {
                     position: "fixed",
                     top: "20px",
                     right: "20px",
@@ -736,18 +662,9 @@ function App() {
                                                         setWaitingForSongSelection(false);
                                                         setStatus("");
                                                         // Stop listening for song selection in CLUI
-                                                        const iframe = document.querySelector("iframe");
-                                                        if (iframe && iframe.contentWindow) {
-                                                            const targetOrigin = (() => {
-                                                                try {
-                                                                    return new URL(iframeSrc).origin;
-                                                                }
-                                                                catch {
-                                                                    return "*";
-                                                                }
-                                                            })();
-                                                            iframe.contentWindow.postMessage({ type: "STOP_SONG_SELECTION_MODE" }, targetOrigin);
-                                                        }
+                                                        window.electron?.invoke?.("clui:postMessage", {
+                                                            type: "STOP_SONG_SELECTION_MODE",
+                                                        });
                                                     }, style: {
                                                         padding: "8px 16px",
                                                         backgroundColor: "rgba(255, 255, 255, 0.1)",
