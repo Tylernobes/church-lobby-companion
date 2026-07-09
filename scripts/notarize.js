@@ -10,6 +10,11 @@ exports.default = async function notarizing(context) {
     return;
   }
 
+  if (process.env.SKIP_NOTARIZE === "true") {
+    console.log("Skipping notarization (SKIP_NOTARIZE=true)");
+    return;
+  }
+
   const appName = context.packager.appInfo.productFilename;
 
   // API Key method (recommended)

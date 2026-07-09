@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("node:path");
 const midi = require("@julusian/midi");
 
+const isDev = !app.isPackaged;
 let win = null;
 let kv = null;
 
@@ -31,7 +32,6 @@ function createWindow() {
   console.log("Loading Church Lobby Companion desktop app");
 
   // Load the hamburger MIDI interface in both dev and production
-  const isDev = !app.isPackaged;
   if (isDev) {
     win.loadURL("http://localhost:5173");
     win.webContents.openDevTools();
@@ -104,6 +104,8 @@ function createVirtualPort() {
     return false;
   }
 }
+
+//
 
 function openInput(index) {
   if (input) {
@@ -269,95 +271,108 @@ function postToWebsite(channel, payload) {
   }
 }
 
+ipcMain.handle("midi:list", () => listMidiInputs());
+ipcMain.handle("midi:open", (_e, idx) => openInput(idx));
+
+// Device listing and connection handlers for the UI
+ipcMain.handle("midi-get-devices", () => listMidiInputs());
+ipcMain.handle("midi-connect", (_e, device) => {
+  const deviceIndex = typeof device.id === 'string' ? device.id : device.id.toString();
+  return openInput(deviceIndex);
+});
+
+// Learning mode handlers
+ipcMain.handle("midi:startLearning", (_e, action) => {
+  return new Promise((resolve) => {
+    console.log(`🎓 Starting MIDI learning for action: ${action}`);
+
+    // Clear any existing learning mode first
+    if (learningMode) {
+      console.log(`🎓 Clearing previous learning mode: ${learningMode.action}`);
+      learningMode.resolve(null);
+    }
+
+    learningMode = { action, resolve };
+    console.log(`🎓 Learning mode activated for: ${action}`);
+
+    // Set a timeout to cancel learning after 10 seconds
+    setTimeout(() => {
+      if (learningMode && learningMode.action === action) {
+        console.log(`🎓 Learning mode timed out for: ${action}`);
+        learningMode = null;
+        resolve(null); // Return null if timeout
+      }
+    }, 10000);
+  });
+});
+
+ipcMain.handle("midi:stopLearning", () => {
+  console.log("🎓 Stopping MIDI learning");
+  if (learningMode) {
+    console.log(`🎓 Clearing learning mode: ${learningMode.action}`);
+    learningMode.resolve(null);
+    learningMode = null;
+  }
+  console.log("🎓 Learning mode fully cleared");
+  return true;
+});
+
+ipcMain.handle("map:get", async () => {
+  const store = await initStore();
+  return store.get("mappings") || [];
+});
+ipcMain.handle("map:set", async (_e, items) => {
+  const store = await initStore();
+  return store.set("mappings", items);
+});
+ipcMain.handle("settings:get", async () => {
+  const store = await initStore();
+  return store.get("settings") || {};
+});
+ipcMain.handle("settings:set", async (_e, patch) => {
+  const store = await initStore();
+  const cur = store.get("settings") || {};
+  store.set("settings", { ...cur, ...patch });
+});
+
+// Auto-connect learning mode handlers (simplified)
+ipcMain.handle("midi:start-learning", async (_e, action) => {
+  return new Promise((resolve) => {
+    console.log(`🎓 Starting MIDI learning for action: ${action}`);
+
+    // Clear any existing learning mode first
+    if (learningMode) {
+      console.log(`🎓 Clearing previous learning mode: ${learningMode.action}`);
+      learningMode.resolve(null);
+    }
+
+    learningMode = { action, resolve };
+    console.log(`🎓 Learning mode activated for: ${action}`);
+
+    // Set a timeout to cancel learning after 10 seconds
+    setTimeout(() => {
+      if (learningMode && learningMode.action === action) {
+        console.log(`🎓 Learning mode timed out for: ${action}`);
+        learningMode = null;
+        resolve(null); // Return null if timeout
+      }
+    }, 10000);
+  });
+});
+
+ipcMain.handle("midi:stop-learning", async () => {
+  console.log("🎓 Stopping MIDI learning");
+  if (learningMode) {
+    console.log(`🎓 Clearing learning mode: ${learningMode.action}`);
+    learningMode.resolve(null);
+    learningMode = null;
+  }
+  console.log("🎓 Learning mode fully cleared");
+  return true;
+});
+
 app.whenReady().then(async () => {
   await initStore();
-
-  // Setup all IPC handlers after app is ready
-  ipcMain.handle("midi:open", (_e, idx) => openInput(idx));
-  ipcMain.handle("midi-get-devices", () => listMidiInputs());
-  ipcMain.handle("midi-connect", (_e, device) => {
-    const deviceIndex = typeof device.id === 'string' ? device.id : device.id.toString();
-    return openInput(deviceIndex);
-  });
-  
-  // Learning mode handlers
-  ipcMain.handle("midi:startLearning", (_e, action) => {
-    return new Promise((resolve) => {
-      console.log(`🎓 Starting MIDI learning for action: ${action}`);
-      if (learningMode) {
-        console.log(`🎓 Clearing previous learning mode: ${learningMode.action}`);
-        learningMode.resolve(null);
-      }
-      learningMode = { action, resolve };
-      console.log(`🎓 Learning mode activated for: ${action}`);
-      setTimeout(() => {
-        if (learningMode && learningMode.action === action) {
-          console.log(`🎓 Learning mode timed out for: ${action}`);
-          learningMode = null;
-          resolve(null);
-        }
-      }, 10000);
-    });
-  });
-  
-  ipcMain.handle("midi:stopLearning", () => {
-    console.log("🎓 Stopping MIDI learning");
-    if (learningMode) {
-      console.log(`🎓 Clearing learning mode: ${learningMode.action}`);
-      learningMode.resolve(null);
-      learningMode = null;
-    }
-    console.log("🎓 Learning mode fully cleared");
-    return true;
-  });
-  
-  ipcMain.handle("midi:start-learning", async (_e, action) => {
-    return new Promise((resolve) => {
-      console.log(`🎓 Starting MIDI learning for action: ${action}`);
-      if (learningMode) {
-        console.log(`🎓 Clearing previous learning mode: ${learningMode.action}`);
-        learningMode.resolve(null);
-      }
-      learningMode = { action, resolve };
-      console.log(`🎓 Learning mode activated for: ${action}`);
-      setTimeout(() => {
-        if (learningMode && learningMode.action === action) {
-          console.log(`🎓 Learning mode timed out for: ${action}`);
-          learningMode = null;
-          resolve(null);
-        }
-      }, 10000);
-    });
-  });
-  
-  ipcMain.handle("midi:stop-learning", async () => {
-    console.log("🎓 Stopping MIDI learning");
-    if (learningMode) {
-      console.log(`🎓 Clearing learning mode: ${learningMode.action}`);
-      learningMode.resolve(null);
-      learningMode = null;
-    }
-    console.log("🎓 Learning mode fully cleared");
-    return true;
-  });
-  
-  ipcMain.handle("map:get", async () => {
-    const store = await initStore();
-    return store.get("mappings") || [];
-  });
-  ipcMain.handle("map:set", async (_e, items) => {
-    const store = await initStore();
-    return store.set("mappings", items);
-  });
-  ipcMain.handle("settings:get", async () => {
-    const store = await initStore();
-    return store.get("settings") || {};
-  });
-  ipcMain.handle("settings:set", async (_e, patch) => {
-    const store = await initStore();
-    const cur = store.get("settings") || {};
-    store.set("settings", { ...cur, ...patch });
-  });
 
   // Create virtual MIDI port for MIDI software to connect to
   const virtualPortCreated = createVirtualPort();
@@ -370,7 +385,6 @@ app.whenReady().then(async () => {
 
   createWindow();
 });
-
 app.on("window-all-closed", () => {
   // Clean up MIDI ports
   if (input) {
@@ -385,3 +399,5 @@ app.on("window-all-closed", () => {
   }
   if (process.platform !== "darwin") app.quit();
 });
+
+//

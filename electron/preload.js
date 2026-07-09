@@ -1,31 +1,5 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-// Relay desktop → web page commands
-ipcRenderer.on("cl:command", (_e, payload) => {
-  window.postMessage({ channel: "cl:command", payload });
-
-  // Also try direct iframe forwarding
-  const iframe = document.querySelector("iframe");
-  if (iframe && iframe.contentWindow) {
-    try{
-      // Legacy debug message (no-op for CLUI)
-      iframe.contentWindow.postMessage({ channel: "cl:command", payload }, "*");
-
-      // Canonical message that CLUI listens for
-      const audioCommand = {
-        type: "AUDIO_COMMAND",
-        command: payload?.type || payload?.command,
-        seconds: payload?.seconds,
-        songId: payload?.songId,
-        songTitle: payload?.songTitle,
-      };
-      iframe.contentWindow.postMessage(audioCommand, "*");
-    } catch (error) {
-      console.error("Error forwarding to iframe:", error);
-    }
-  }
-});
-
 // Relay MIDI messages to React UI
 ipcRenderer.on("midi:message", (_e, message) => {
   window.postMessage({ type: "midi:message", payload: message }, "*");
@@ -34,6 +8,11 @@ ipcRenderer.on("midi:message", (_e, message) => {
 // Relay learning results to React UI
 ipcRenderer.on("midi:learning-result", (_e, result) => {
   window.postMessage({ type: "midi:learning-result", payload: result }, "*");
+});
+
+// Relay CLUI messages (subscription, song selection) to the overlay UI
+ipcRenderer.on("clui:message", (_e, payload) => {
+  window.postMessage(payload, "*");
 });
 
 contextBridge.exposeInMainWorld("desktop", {

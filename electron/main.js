@@ -1,10 +1,42 @@
-const { app, BrowserWindow, ipcMain, dialog, powerSaveBlocker, shell, session } = require("electron");
+const { app, BrowserWindow, BrowserView, ipcMain, dialog, powerSaveBlocker, shell, session } = require("electron");
 const path = require("node:path");
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
+const http = require("node:http");
+const https = require("node:https");
+const { URL } = require("node:url");
 const midi = require("@julusian/midi");
 
-let win = null;
+app.setName("Church Lobby");
+app.setPath(
+  "userData",
+  path.join(app.getPath("appData"), "Church Lobby")
+);
+
+let mainWindow = null;
+let overlayView = null;
 let kv = null;
 let powerSaveBlockerId = null;
+let offlineServer = null;
+let offlinePort = null;
+let offlineIndexCache = { songs: {}, playlists: {}, albums: {} };
+
+const OFFLINE_DIR_NAME = "offline-cache";
+const OFFLINE_LEASE_DAYS = 21;
+
+const CLUI_PROD_URL = "https://clui.expo.app";
+const CLUI_DEV_URLS = [
+  "http://localhost:19006",
+  "http://127.0.0.1:19006",
+  "http://localhost:8081",
+  "http://127.0.0.1:8081",
+];
+const OVERLAY_EXPANDED_WIDTH = 360;
+const OVERLAY_EXPANDED_HEIGHT = 720;
+const OVERLAY_COLLAPSED_SIZE = 68;
+const OVERLAY_MARGIN = 12;
+let overlayExpanded = false;
+let updateOverlayBounds = null;
 
 async function initStore() {
   if (!kv) {
@@ -14,20 +46,286 @@ async function initStore() {
   return kv;
 }
 
+async function ensureOfflineRoot() {
+  const root = path.join(app.getPath("userData"), OFFLINE_DIR_NAME);
+  await fsp.mkdir(root, { recursive: true });
+  return root;
+}
+
+async function loadOfflineIndex() {
+  const store = await initStore();
+  offlineIndexCache = store.get("offlineIndex") || { songs: {}, playlists: {}, albums: {} };
+  return offlineIndexCache;
+}
+
+function persistOfflineIndex() {
+  if (kv) kv.set("offlineIndex", offlineIndexCache);
+}
+
+function isExpired(entry) {
+  return !!entry?.expiresAt && entry.expiresAt < Date.now();
+}
+
+function computeOfflineSummary() {
+  const playlists = Object.entries(offlineIndexCache.playlists || {})
+    .filter(([, entry]) => !isExpired(entry))
+    .map(([id, entry]) => ({
+      id,
+      title: entry?.title || "Playlist",
+      songCount: (entry?.songIds || []).length,
+      songIds: entry?.songIds || [],
+      expiresAt: entry?.expiresAt || null,
+    }));
+  const albums = Object.entries(offlineIndexCache.albums || {})
+    .filter(([, entry]) => !isExpired(entry))
+    .map(([id, entry]) => ({
+      id,
+      title: entry?.title || "Album",
+      songCount: (entry?.songIds || []).length,
+      songIds: entry?.songIds || [],
+      expiresAt: entry?.expiresAt || null,
+    }));
+  const songs = Object.values(offlineIndexCache.songs || {});
+  const songMeta = Object.entries(offlineIndexCache.songs || {}).reduce((acc, [id, entry]) => {
+    if (isExpired(entry)) return acc;
+    acc[id] = {
+      title: entry?.title || null,
+      artist: entry?.artist || null,
+      albumTitle: entry?.albumTitle || null,
+      albumId: entry?.albumId || entry?.albumID || null,
+      albumID: entry?.albumID || entry?.albumId || null,
+      circlePath: entry?.circlePath || null,
+    };
+    return acc;
+  }, {});
+  const totalSize = songs.reduce((sum, s) => sum + (s?.size || 0), 0);
+  return {
+    playlists,
+    albums,
+    songs: songMeta,
+    songCount: songs.length,
+    totalSize,
+  };
+}
+
+function getSongFilePath(root, songId, audioUrl) {
+  let ext = ".mp3";
+  try {
+    const u = new URL(audioUrl);
+    const maybeExt = path.extname(u.pathname || "");
+    if (maybeExt) ext = maybeExt;
+  } catch {}
+  return path.join(root, `${songId}${ext}`);
+}
+
+async function downloadToFile(audioUrl, filePath) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(audioUrl);
+    const client = u.protocol === "https:" ? https : http;
+    const req = client.get(u, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return downloadToFile(res.headers.location, filePath).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`Download failed: ${res.statusCode}`));
+      }
+      const file = fs.createWriteStream(filePath);
+      res.pipe(file);
+      file.on("finish", () => file.close(resolve));
+      file.on("error", (err) => {
+        try { fs.unlinkSync(filePath); } catch {}
+        reject(err);
+      });
+    });
+    req.on("error", reject);
+  });
+}
+
+async function downloadSong(song) {
+  if (!song?.id || !song?.audioUrl) return null;
+  const root = await ensureOfflineRoot();
+  const existing = offlineIndexCache.songs[song.id];
+  if (existing && !isExpired(existing) && fs.existsSync(existing.path)) {
+    return existing;
+  }
+  const filePath = getSongFilePath(root, song.id, song.audioUrl);
+  await downloadToFile(song.audioUrl, filePath);
+  const stats = await fsp.stat(filePath).catch(() => null);
+  const entry = {
+    path: filePath,
+    size: stats?.size || 0,
+    expiresAt: Date.now() + OFFLINE_LEASE_DAYS * 24 * 60 * 60 * 1000,
+    title: song?.title || null,
+    artist: song?.artist || null,
+    albumTitle: song?.albumTitle || null,
+    albumId: song?.albumId || song?.albumID || null,
+    albumID: song?.albumID || song?.albumId || null,
+    circlePath: song?.circlePath || null,
+  };
+  offlineIndexCache.songs[song.id] = entry;
+  persistOfflineIndex();
+  return entry;
+}
+
+function startOfflineServer() {
+  if (offlineServer) return;
+  offlineServer = http.createServer((req, res) => {
+    const baseHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
+      "Access-Control-Allow-Headers": "Range,Origin,Content-Type,Accept",
+      "Access-Control-Expose-Headers": "Content-Length,Content-Range",
+      "Accept-Ranges": "bytes",
+    };
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, baseHeaders);
+      return res.end();
+    }
+    try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (!url.pathname.startsWith("/song/")) {
+        res.writeHead(404, baseHeaders);
+        return res.end();
+      }
+      const songId = url.pathname.replace("/song/", "").trim();
+      const entry = offlineIndexCache.songs[songId];
+      if (!entry || isExpired(entry) || !fs.existsSync(entry.path)) {
+        res.writeHead(404, baseHeaders);
+        return res.end();
+      }
+      const stats = fs.statSync(entry.path);
+      const fileSize = stats.size;
+      const range = req.headers.range;
+      const contentType = "audio/mpeg";
+
+      if (range) {
+        const match = /bytes=(\d+)-(\d*)/.exec(range);
+        if (!match) {
+          res.writeHead(416, { ...baseHeaders, "Content-Range": `bytes */${fileSize}` });
+          return res.end();
+        }
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+        if (start >= fileSize || end < start) {
+          res.writeHead(416, { ...baseHeaders, "Content-Range": `bytes */${fileSize}` });
+          return res.end();
+        }
+        const chunkSize = end - start + 1;
+        res.writeHead(206, {
+          ...baseHeaders,
+          "Content-Type": contentType,
+          "Content-Length": chunkSize,
+          "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        });
+        if (req.method === "HEAD") return res.end();
+        return fs.createReadStream(entry.path, { start, end }).pipe(res);
+      }
+
+      res.writeHead(200, {
+        ...baseHeaders,
+        "Content-Type": contentType,
+        "Content-Length": fileSize,
+      });
+      if (req.method === "HEAD") return res.end();
+      fs.createReadStream(entry.path).pipe(res);
+    } catch {
+      res.writeHead(500, baseHeaders);
+      res.end();
+    }
+  });
+  offlineServer.listen(0, "127.0.0.1", () => {
+    const address = offlineServer.address();
+    offlinePort = typeof address === "object" && address ? address.port : null;
+    console.log("Offline server listening on", offlinePort);
+  });
+}
+
+function loadCluiWithFallback(targetWindow) {
+  const candidates = [...CLUI_DEV_URLS, CLUI_PROD_URL];
+  let index = 0;
+
+  const tryNext = () => {
+    const url = candidates[index];
+    if (!url) {
+      return;
+    }
+    index += 1;
+    targetWindow.loadURL(url);
+  };
+
+  const handleFail = () => {
+    if (index < candidates.length) {
+      tryNext();
+    }
+  };
+
+  targetWindow.webContents.on("did-fail-load", handleFail);
+  tryNext();
+}
+
+function attachOverlayView(parentWindow, isDev) {
+  overlayView = new BrowserView({
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      backgroundThrottling: false,
+    },
+  });
+
+  overlayView.setBackgroundColor("#00000000");
+
+  parentWindow.setBrowserView(overlayView);
+
+  updateOverlayBounds = () => {
+    const [width, height] = parentWindow.getContentSize();
+    const targetWidth = overlayExpanded
+      ? OVERLAY_EXPANDED_WIDTH
+      : OVERLAY_COLLAPSED_SIZE;
+    const targetHeight = overlayExpanded
+      ? OVERLAY_EXPANDED_HEIGHT
+      : OVERLAY_COLLAPSED_SIZE;
+    const viewWidth = Math.min(targetWidth, width);
+    const viewHeight = Math.min(targetHeight, height);
+    overlayView.setBounds({
+      x: Math.max(0, width - viewWidth - OVERLAY_MARGIN),
+      y: OVERLAY_MARGIN,
+      width: viewWidth,
+      height: viewHeight,
+    });
+  };
+
+  updateOverlayBounds();
+  parentWindow.once("ready-to-show", updateOverlayBounds);
+  parentWindow.on("show", updateOverlayBounds);
+  parentWindow.on("resize", updateOverlayBounds);
+
+  if (isDev) {
+    overlayView.webContents.loadURL("http://localhost:5173");
+  } else {
+    const rendererPath = path.join(
+      process.resourcesPath,
+      "renderer",
+      "index.html"
+    );
+    overlayView.webContents.loadFile(rendererPath);
+  }
+}
+
 function createWindow() {
-  win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 390,
     height: 844,
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload-clui.js"),
       nodeIntegration: false,
       contextIsolation: true,
       // Ensure timers/animation don't throttle when window is unfocused/occluded
       backgroundThrottling: false,
       // Enable persistent storage for login sessions
       partition: "persist:church-lobby",
-      // Disable web security to allow iframe cross-origin requests (Firebase Storage, etc.)
-      webSecurity: false,
     },
     resizable: true,
     minWidth: 375,
@@ -35,27 +333,24 @@ function createWindow() {
   });
   console.log("Loading Church Lobby Companion desktop app");
 
-  // Load the hamburger MIDI interface in both dev and production
   const isDev = !app.isPackaged;
   if (isDev) {
-    win.loadURL("http://localhost:5173");
-    win.webContents.openDevTools();
+    loadCluiWithFallback(mainWindow);
+    mainWindow.webContents.openDevTools();
   } else {
-    // Load the built hamburger interface (which contains iframe to CLUI)
-    const rendererPath = path.join(
-      process.resourcesPath,
-      "renderer",
-      "index.html"
-    );
-    console.log("Loading renderer from:", rendererPath);
-    win.loadFile(rendererPath);
+    mainWindow.loadURL(CLUI_PROD_URL);
   }
+
+  attachOverlayView(mainWindow, isDev);
 }
 
 let input = null;
+let hardwareInputs = new Map();
 let virtualInput = null;
 const VIRTUAL_PORT_NAME = "Church Lobby Companion";
 let learningMode = null; // { action: string, resolve: function }
+let postLearnSuppress = null; // { channel: number, note: number, until: number }
+let playPauseFallbackIsPlaying = true;
 
 function listMidiInputs() {
   const tmp = new midi.Input();
@@ -88,6 +383,74 @@ function listMidiInputs() {
   return list;
 }
 
+function getSourceMetaForPort(index) {
+  if (index === "virtual") {
+    return {
+      sourceType: "virtual",
+      sourceId: "virtual",
+      sourceName: "Virtual Port (Church Lobby Companion)",
+    };
+  }
+
+  const portIndex = Number.parseInt(String(index), 10);
+  if (!Number.isFinite(portIndex)) {
+    return {
+      sourceType: "hardware",
+      sourceId: `port:${String(index)}`,
+      sourceName: `MIDI Port ${String(index)}`,
+    };
+  }
+
+  let portName = `MIDI Port ${portIndex}`;
+  try {
+    const tmp = new midi.Input();
+    const count = tmp.getPortCount();
+    if (portIndex >= 0 && portIndex < count) {
+      portName = tmp.getPortName(portIndex) || portName;
+    }
+    tmp.closePort();
+  } catch {}
+
+  return {
+    sourceType: "hardware",
+    sourceId: `port:${portIndex}`,
+    sourceName: portName,
+  };
+}
+
+function mappingHasSourceConstraint(mapping) {
+  return (
+    mapping?.sourceLocked === true ||
+    typeof mapping?.sourceId === "string" ||
+    typeof mapping?.sourceType === "string"
+  );
+}
+
+function mappingMatchesSource(mapping, sourceMeta) {
+  if (!mappingHasSourceConstraint(mapping)) {
+    return true;
+  }
+
+  if (
+    typeof mapping?.sourceId === "string" &&
+    mapping.sourceId &&
+    mapping.sourceId !== sourceMeta.sourceId
+  ) {
+    return false;
+  }
+
+  if (
+    typeof mapping?.sourceType === "string" &&
+    mapping.sourceType &&
+    mapping.sourceType !== "unknown" &&
+    mapping.sourceType !== sourceMeta.sourceType
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 function createVirtualPort() {
   try {
     // Create virtual MIDI input port for receiving from MIDI software
@@ -99,7 +462,8 @@ function createVirtualPort() {
     }
     virtualInput = new midi.Input();
     virtualInput.openVirtualPort(VIRTUAL_PORT_NAME);
-    virtualInput.on("message", (_deltaTime, msg) => onMidi(msg));
+    const sourceMeta = getSourceMetaForPort("virtual");
+    virtualInput.on("message", (_deltaTime, msg) => onMidi(msg, sourceMeta));
     console.log(
       `Virtual MIDI port '${VIRTUAL_PORT_NAME}' created successfully`
     );
@@ -111,13 +475,6 @@ function createVirtualPort() {
 }
 
 function openInput(index) {
-  if (input) {
-    try {
-      input.closePort();
-    } catch {}
-    input = null;
-  }
-
   if (index === "virtual") {
     // Virtual port is already created and listening - just confirm connection
     console.log("Connected to virtual MIDI port");
@@ -130,12 +487,25 @@ function openInput(index) {
     return true;
   }
 
+  const parsedIndex = Number.parseInt(String(index), 10);
+  if (!Number.isFinite(parsedIndex)) {
+    console.warn("MIDI error: invalid device index", index);
+    return false;
+  }
+
+  if (hardwareInputs.has(parsedIndex)) {
+    return true;
+  }
+
   try {
     const inPort = new midi.Input();
-    inPort.on("message", (_deltaTime, msg) => onMidi(msg));
-    inPort.openPort(parseInt(index));
+    const sourceMeta = getSourceMetaForPort(parsedIndex);
+    inPort.on("message", (_deltaTime, msg) => onMidi(msg, sourceMeta));
+    inPort.openPort(parsedIndex);
+    hardwareInputs.set(parsedIndex, inPort);
+    // Keep legacy reference for backward compatibility with old debug paths.
     input = inPort;
-    console.log("MIDI input opened:", index);
+    console.log("MIDI input opened:", parsedIndex);
     return true;
   } catch (error) {
     console.warn("MIDI error:", error.message);
@@ -143,8 +513,22 @@ function openInput(index) {
   }
 }
 
-function onMidi(message) {
+function openAllHardwareInputs(devices) {
+  const sourceList = Array.isArray(devices) ? devices : listMidiInputs();
+  const hardwareDevices = sourceList.filter((d) => d?.id !== "virtual");
+  for (const device of hardwareDevices) {
+    openInput(device.id);
+  }
+}
+
+function onMidi(message, sourceMeta) {
   console.log("MIDI message received:", message);
+
+  const resolvedSource = sourceMeta || {
+    sourceType: "unknown",
+    sourceId: "unknown",
+    sourceName: "Unknown MIDI Source",
+  };
 
   // Parse MIDI message
   const [status, note, velocity = 0] = message;
@@ -153,51 +537,88 @@ function onMidi(message) {
   const NOTE_ON = 0x90;
   const NOTE_OFF = 0x80;
   const CC = 0xb0;
+  const now = Date.now();
 
   // Send MIDI info to UI in real-time
-  if (win) {
-    win.webContents.send("midi:message", {
+  if (overlayView?.webContents) {
+    overlayView.webContents.send("midi:message", {
       raw: Array.from(message),
       type: messageType.toString(16),
       channel,
       note,
       velocity,
+      sourceType: resolvedSource.sourceType,
+      sourceId: resolvedSource.sourceId,
+      sourceName: resolvedSource.sourceName,
       timestamp: Date.now(),
     });
   }
 
-  // Learning: original behavior—Note On only, original payload shape
-  if (learningMode && messageType === NOTE_ON) {
-    const midiKey = `ch${channel}-note${note}`;
-    if (win) {
-      win.webContents.send("midi:learning-result", {
+  // While learning is active, capture Note On or CC and suppress mapped actions.
+  if (learningMode) {
+    if (messageType === NOTE_ON || messageType === CC) {
+      const learnedType = messageType === CC ? "cc" : "note";
+      const midiKey = `ch${channel}-${learnedType}${note}`;
+      if (overlayView?.webContents) {
+        overlayView.webContents.send("midi:learning-result", {
+          type: learnedType,
+          channel,
+          number: note,
+          note,
+          velocity,
+          action: learningMode.action,
+          midiKey,
+          sourceType: resolvedSource.sourceType,
+          sourceId: resolvedSource.sourceId,
+          sourceName: resolvedSource.sourceName,
+        });
+      }
+      // Ignore trailing events from the same physical key press right after capture.
+      postLearnSuppress = {
         channel,
         note,
-        action: learningMode.action,
-        midiKey,
-      });
+        type: learnedType,
+        sourceId: resolvedSource.sourceId,
+        until: now + 350,
+      };
+      learningMode = null;
     }
-    learningMode = null;
     return;
   }
 
-  // Dispatch mappings for Note On (any velocity), Note Off, or CC (value > 0)
-  if (messageType === NOTE_ON) {
+  if (
+    postLearnSuppress &&
+    now <= postLearnSuppress.until &&
+    postLearnSuppress.channel === channel &&
+    postLearnSuppress.note === note &&
+    postLearnSuppress.sourceId === resolvedSource.sourceId &&
+    ((postLearnSuppress.type === "note" &&
+      (messageType === NOTE_ON || messageType === NOTE_OFF)) ||
+      (postLearnSuppress.type === "cc" && messageType === CC))
+  ) {
+    return;
+  }
+
+  if (postLearnSuppress && now > postLearnSuppress.until) {
+    postLearnSuppress = null;
+  }
+
+  // Dispatch mappings for Note On (velocity > 0) or CC.
+  // Note Off is ignored for mapped actions to prevent duplicate triggers.
+  if (messageType === NOTE_ON && velocity > 0) {
     if (kv) {
       const mappings = kv.get("mappings") || [];
-      const mapping = mappings.find(
+      const candidates = mappings.filter(
         (m) => m.type === "note" && m.channel === channel && m.number === note
       );
-      if (mapping) {
-        dispatchMappedAction(mapping);
-      }
-    }
-  } else if (messageType === NOTE_OFF) {
-    if (kv) {
-      const mappings = kv.get("mappings") || [];
-      const mapping = mappings.find(
-        (m) => m.type === "note" && m.channel === channel && m.number === note
+      const constrained = candidates.filter((m) => mappingHasSourceConstraint(m));
+      const constrainedMatch = constrained.find((m) =>
+        mappingMatchesSource(m, resolvedSource)
       );
+      const legacyFallback = candidates.find(
+        (m) => !mappingHasSourceConstraint(m)
+      );
+      const mapping = constrainedMatch || legacyFallback;
       if (mapping) {
         dispatchMappedAction(mapping);
       }
@@ -205,9 +626,17 @@ function onMidi(message) {
   } else if (messageType === CC && velocity >= 0) {
     if (kv) {
       const mappings = kv.get("mappings") || [];
-      const mapping = mappings.find(
+      const candidates = mappings.filter(
         (m) => m.type === "cc" && m.channel === channel && m.number === note
       );
+      const constrained = candidates.filter((m) => mappingHasSourceConstraint(m));
+      const constrainedMatch = constrained.find((m) =>
+        mappingMatchesSource(m, resolvedSource)
+      );
+      const legacyFallback = candidates.find(
+        (m) => !mappingHasSourceConstraint(m)
+      );
+      const mapping = constrainedMatch || legacyFallback;
       if (mapping) {
         dispatchMappedAction(mapping);
       }
@@ -219,56 +648,115 @@ function dispatchMappedAction(mapping) {
   const seconds = typeof mapping.seconds === "number" ? mapping.seconds : 10;
 
   switch (mapping.action) {
+    case "prev":
+      postToClui({ type: "prev" });
+      break;
+    case "playPause":
+      // Compatibility fallback: older CLUI runtimes don't support playPause.
+      // Alternate between play/pause commands locally so the mapping still works.
+      postToClui({ type: playPauseFallbackIsPlaying ? "pause" : "play" });
+      playPauseFallbackIsPlaying = !playPauseFallbackIsPlaying;
+      break;
+    case "next":
+      postToClui({ type: "next" });
+      break;
     case "fadeIn":
-      postToWebsite("cl:command", { type: "fadeIn", seconds });
+      postToClui({ type: "fadeIn", seconds });
       break;
     case "fadeOut":
-      postToWebsite("cl:command", { type: "fadeOut", seconds, pause: true });
+      postToClui({ type: "fadeOut", seconds, pause: true });
       break;
     case "stop":
-      postToWebsite("cl:command", { type: "stop" });
+      postToClui({ type: "stop" });
       break;
     case "selectAndFadeIn":
       if (mapping.songId || mapping.songTitle) {
-        postToWebsite("cl:command", {
+        postToClui({
           type: "selectAndFadeIn",
           seconds,
           songId: mapping.songId,
           songTitle: mapping.songTitle,
+          playlistId: mapping.playlistId,
+          albumId: mapping.albumId,
+          queueSongIds: mapping.queueSongIds,
+        });
+      }
+      break;
+    case "launchPlaylist":
+      if (mapping.playlistId) {
+        postToClui({
+          type: "launchPlaylist",
+          seconds,
+          startSongId: mapping.songId,
+          playlistTitle: mapping.playlistTitle,
+          playlistId: mapping.playlistId,
+          queueSongIds: mapping.queueSongIds,
+        });
+      }
+      break;
+    case "launchAlbum":
+      if (mapping.albumId) {
+        postToClui({
+          type: "launchAlbum",
+          seconds,
+          startSongId: mapping.songId,
+          albumTitle: mapping.albumTitle,
+          albumId: mapping.albumId,
+          queueSongIds: mapping.queueSongIds,
         });
       }
       break;
   }
 }
 
-function postToWebsite(channel, payload) {
-  if (win && win.webContents) {
-    // Forward to renderer; preload will forward to the iframe via postMessage.
-    win.webContents.send(channel, payload);
+function postToClui(payload) {
+  if (!mainWindow?.webContents) {
+    return;
   }
+
+  const audioCommand = {
+    type: "AUDIO_COMMAND",
+    command: payload?.type || payload?.command,
+    seconds: payload?.seconds,
+    songId: payload?.songId,
+    songTitle: payload?.songTitle,
+    startSongId: payload?.startSongId,
+    playlistTitle: payload?.playlistTitle,
+    playlistId: payload?.playlistId,
+    albumTitle: payload?.albumTitle,
+    albumId: payload?.albumId,
+    queueSongIds: payload?.queueSongIds,
+  };
+
+  mainWindow.webContents.send("clui:postMessage", audioCommand);
 }
 
-app.whenReady().then(async () => {
-  await initStore();
-
-  // Configure session for persistent storage
-  const ses = session.fromPartition('persist:church-lobby');
-  
-  // Grant storage permissions
+function configureStoragePermissionsForSession(ses) {
   ses.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'persistent-storage' || permission === 'storage') {
+    if (permission === "persistent-storage" || permission === "storage") {
       callback(true);
       return;
     }
     callback(false);
   });
-  
-  ses.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
-    if (permission === 'persistent-storage' || permission === 'storage') {
+
+  ses.setPermissionCheckHandler((_webContents, permission) => {
+    if (permission === "persistent-storage" || permission === "storage") {
       return true;
     }
     return false;
   });
+}
+
+app.whenReady().then(async () => {
+  await initStore();
+  await loadOfflineIndex();
+  startOfflineServer();
+
+  // Configure session for persistent storage
+  const ses = session.fromPartition("persist:church-lobby");
+  configureStoragePermissionsForSession(ses);
+  configureStoragePermissionsForSession(session.defaultSession);
 
   // Prevent App Nap and system sleep to avoid gray screen issue
   powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension');
@@ -276,7 +764,11 @@ app.whenReady().then(async () => {
 
   // Setup all IPC handlers after app is ready
   ipcMain.handle("midi:open", (_e, idx) => openInput(idx));
-  ipcMain.handle("midi:get-devices", () => listMidiInputs());
+  ipcMain.handle("midi:get-devices", () => {
+    const devices = listMidiInputs();
+    openAllHardwareInputs(devices);
+    return devices;
+  });
   ipcMain.handle("midi:connect", (_e, deviceId) => {
     return openInput(deviceId);
   });
@@ -360,6 +852,30 @@ app.whenReady().then(async () => {
     store.set("settings", { ...cur, ...patch });
   });
 
+  ipcMain.handle("app:version", async () => app.getVersion());
+
+  ipcMain.handle("clui:postMessage", (_e, payload) => {
+    if (mainWindow?.webContents) {
+      mainWindow.webContents.send("clui:postMessage", payload);
+      return true;
+    }
+    return false;
+  });
+
+  ipcMain.handle("overlay:set-expanded", (_e, expanded) => {
+    overlayExpanded = !!expanded;
+    if (typeof updateOverlayBounds === "function") {
+      updateOverlayBounds();
+    }
+    return true;
+  });
+
+  ipcMain.on("clui:message", (_e, payload) => {
+    if (overlayView?.webContents) {
+      overlayView.webContents.send("clui:message", payload);
+    }
+  });
+
   // Create virtual MIDI port for MIDI software to connect to
   const virtualPortCreated = createVirtualPort();
   
@@ -369,7 +885,84 @@ app.whenReady().then(async () => {
     console.log(`Virtual port connection: ${connected ? 'SUCCESS' : 'FAILED'}`);
   }
 
+  // Listen to all available hardware inputs so mapped triggers are independent
+  // of the currently selected device in the UI.
+  openAllHardwareInputs();
+
   createWindow();
+});
+
+ipcMain.handle("offline:download-playlist", async (_e, payload) => {
+  await loadOfflineIndex();
+  const playlistId = payload?.playlistId || "unknown";
+  const title = payload?.title || "Playlist";
+  const songs = Array.isArray(payload?.songs) ? payload.songs : [];
+  for (const song of songs) {
+    try { await downloadSong(song); } catch (e) { console.warn("Offline download failed", song?.id, e?.message || e); }
+  }
+  offlineIndexCache.playlists[playlistId] = {
+    songIds: songs.map((s) => s.id),
+    title,
+    expiresAt: Date.now() + OFFLINE_LEASE_DAYS * 24 * 60 * 60 * 1000,
+  };
+  persistOfflineIndex();
+  return { ok: true, downloaded: songs.length };
+});
+
+ipcMain.handle("offline:download-album", async (_e, payload) => {
+  await loadOfflineIndex();
+  const albumId = payload?.albumId || "unknown";
+  const title = payload?.title || "Album";
+  const songs = Array.isArray(payload?.songs) ? payload.songs : [];
+  for (const song of songs) {
+    try { await downloadSong(song); } catch (e) { console.warn("Offline download failed", song?.id, e?.message || e); }
+  }
+  offlineIndexCache.albums[albumId] = {
+    songIds: songs.map((s) => s.id),
+    title,
+    expiresAt: Date.now() + OFFLINE_LEASE_DAYS * 24 * 60 * 60 * 1000,
+  };
+  persistOfflineIndex();
+  return { ok: true, downloaded: songs.length };
+});
+
+ipcMain.handle("offline:get-song-url", async (_e, payload) => {
+  await loadOfflineIndex();
+  const songId = payload?.songId;
+  const entry = songId ? offlineIndexCache.songs[songId] : null;
+  if (!entry || isExpired(entry) || !fs.existsSync(entry.path) || !offlinePort) {
+    return { ok: false };
+  }
+  return { ok: true, url: `http://127.0.0.1:${offlinePort}/song/${songId}` };
+});
+
+ipcMain.handle("offline:get-playlist-status", async (_e, payload) => {
+  await loadOfflineIndex();
+  const playlistId = payload?.playlistId;
+  const entry = playlistId ? offlineIndexCache.playlists[playlistId] : null;
+  if (!entry || isExpired(entry)) return { ok: false };
+  return { ok: true, songIds: entry.songIds || [], expiresAt: entry.expiresAt };
+});
+
+ipcMain.handle("offline:get-album-status", async (_e, payload) => {
+  await loadOfflineIndex();
+  const albumId = payload?.albumId;
+  const entry = albumId ? offlineIndexCache.albums[albumId] : null;
+  if (!entry || isExpired(entry)) return { ok: false };
+  return { ok: true, songIds: entry.songIds || [], expiresAt: entry.expiresAt };
+});
+
+ipcMain.handle("offline:list-downloads", async () => {
+  await loadOfflineIndex();
+  return { ok: true, ...computeOfflineSummary() };
+});
+
+ipcMain.handle("offline:clear-downloads", async () => {
+  const root = await ensureOfflineRoot();
+  await fsp.rm(root, { recursive: true, force: true });
+  offlineIndexCache = { songs: {}, playlists: {}, albums: {} };
+  persistOfflineIndex();
+  return { ok: true };
 });
 
 // Handle opening external URLs

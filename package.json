@@ -1,14 +1,17 @@
 {
-  "name": "church-lobby-companion",
-  "version": "1.2.0",
+  "name": "church-lobby",
+  "version": "2.0.0",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"electron electron/main-dev.js\"",
     "build": "vite build && tsc -p tsconfig.json && electron-builder",
+    "build:unsigned": "vite build && tsc -p tsconfig.json && CSC_IDENTITY_AUTO_DISCOVERY=false SKIP_NOTARIZE=true electron-builder --config.mac.identity=null --config.mac.hardenedRuntime=false --config.dmg.sign=false",
     "build:universal": "vite build && tsc -p tsconfig.json && electron-builder --mac --universal",
     "build:intel": "vite build && tsc -p tsconfig.json && electron-builder --mac --x64",
     "build:silicon": "vite build && tsc -p tsconfig.json && electron-builder --mac --arm64",
+    "release:both-dmg": "bash scripts/release-both-dmgs.sh",
+    "release:both-pkg": "bash scripts/release-both-dmgs.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "electron ."
   },
@@ -21,6 +24,7 @@
       "electron/**/*",
       "dist/renderer/**/*"
     ],
+    "afterPack": "scripts/clear-xattr.js",
     "afterSign": "scripts/notarize.js",
     "extraResources": [
       {
@@ -38,14 +42,8 @@
       "entitlements": "entitlements.mac.plist",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64"
-          ]
-        }
+        "pkg"
       ]
     },
     "dmg": {

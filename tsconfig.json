@@ -1,11 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
-    "moduleResolution": "Node",
+    "module": "Node16",
+    "moduleResolution": "Node16",
     "strict": true,
     "jsx": "react-jsx",
     "skipLibCheck": true,
+    "rootDir": ".",
     "outDir": ".",
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true
