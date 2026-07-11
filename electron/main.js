@@ -25,6 +25,9 @@ const OFFLINE_DIR_NAME = "offline-cache";
 const OFFLINE_LEASE_DAYS = 21;
 
 const CLUI_PROD_URL = "https://clui.expo.app";
+const CLUI_CACHE_BUST_QUERY = "clui_cache_bust";
+const CLUI_NO_CACHE_HEADERS =
+  "Cache-Control: no-cache, no-store, must-revalidate\nPragma: no-cache\nExpires: 0";
 const CLUI_DEV_URLS = [
   "http://localhost:19006",
   "http://127.0.0.1:19006",
@@ -267,11 +270,16 @@ function loadCluiWithFallback(targetWindow) {
   let index = 0;
 
   const tryNext = () => {
-    const url = candidates[index];
+    const rawUrl = candidates[index];
+    const url = rawUrl === CLUI_PROD_URL ? buildCluiProdLaunchUrl() : rawUrl;
     if (!url) {
       return;
     }
     index += 1;
+    if (url.startsWith(CLUI_PROD_URL)) {
+      targetWindow.loadURL(url, { extraHeaders: CLUI_NO_CACHE_HEADERS });
+      return;
+    }
     targetWindow.loadURL(url);
   };
 
@@ -283,6 +291,42 @@ function loadCluiWithFallback(targetWindow) {
 
   targetWindow.webContents.on("did-fail-load", handleFail);
   tryNext();
+}
+
+function buildCluiProdLaunchUrl() {
+  try {
+    const u = new URL(CLUI_PROD_URL);
+    u.searchParams.set(CLUI_CACHE_BUST_QUERY, String(Date.now()));
+    u.searchParams.set("companionVersion", app.getVersion());
+    return u.toString();
+  } catch {
+    return `${CLUI_PROD_URL}?${CLUI_CACHE_BUST_QUERY}=${Date.now()}`;
+  }
+}
+
+async function refreshCluiWebCache() {
+  try {
+    const ses = session.fromPartition("persist:church-lobby");
+    const cluiOrigin = new URL(CLUI_PROD_URL).origin;
+    await Promise.allSettled([
+      ses.clearCache(),
+      ses.clearStorageData({
+        origin: cluiOrigin,
+        storages: ["serviceworkers", "cachestorage"],
+      }),
+    ]);
+  } catch (e) {
+    console.warn("Failed to refresh CLUI web cache:", e?.message || e);
+  }
+}
+
+function loadCluiProdFresh(targetWindow) {
+  void (async () => {
+    await refreshCluiWebCache();
+    targetWindow.loadURL(buildCluiProdLaunchUrl(), {
+      extraHeaders: CLUI_NO_CACHE_HEADERS,
+    });
+  })();
 }
 
 function attachOverlayView(parentWindow, isDev) {
@@ -358,7 +402,7 @@ function createWindow() {
     loadCluiWithFallback(mainWindow);
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadURL(CLUI_PROD_URL);
+    loadCluiProdFresh(mainWindow);
   }
 
   attachOverlayView(mainWindow, isDev);
